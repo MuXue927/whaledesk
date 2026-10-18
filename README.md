@@ -36,10 +36,14 @@ Apple 开发者账号做签名与 notarization；**在没有 Mac 真机验证的
 > 提示：如果遇到「未知发布者 / 已阻止」提示（大多数情况不会），见 [防"未知发布者"提示](#防未知发布者提示)。
 
 ## 自包含版（不需要 .NET）
+
+**从 v0.24.2 起，Release 里直接提供自包含包**：`WhaleDesk-0.24.2-selfcontained.zip`（约 67 MB，解压后约 150 MB，自带 .NET 运行时，目标机不用装 .NET）。
+
+也可以自己构建：
 ```
 whaledesk\scripts\build-dist-selfcontained.cmd
 ```
-产出 `dist-selfcontained\`（约 150 MB，自带 .NET 运行时）。
+
 
 ## 命令行
 | 开关 | 作用 |
