@@ -29,11 +29,11 @@ Apple 开发者账号做签名与 notarization；**在没有 Mac 真机验证的
 
 ## 安装
 1. 下载 `WhaleDesk-<version>.zip` 并解压
-2. 右键解压出来的 `install.cmd` → **解除锁定**（属性 → 勾选"解除锁定"），或运行 `scripts\unblock-files.ps1`
+2. 解压后直接双击 `install.cmd` 安装即可（**大多数电脑不会弹任何提示**）。如果系统提示「未知发布者 / 已阻止」，再右键 `install.cmd` → 属性 → **常规页最下方**勾选「解除锁定」（或运行 `scripts\unblock-files.ps1`）
 3. 双击 `install.cmd`，安装到 `%LOCALAPPDATA%\WhaleDesk`
 4. 桌面会出现「小鲸娘」快捷方式
 
-> 提示：如果 Windows 提示"未知发布者"，见 [防"未知发布者"提示](#防未知发布者提示)。
+> 提示：如果遇到「未知发布者 / 已阻止」提示（大多数情况不会），见 [防"未知发布者"提示](#防未知发布者提示)。
 
 ## 自包含版（不需要 .NET）
 ```
@@ -52,16 +52,23 @@ whaledesk\scripts\build-dist-selfcontained.cmd
 | `--help` | 全部开关 |
 
 ## 防"未知发布者"提示
-Windows 对**没有数字签名**的 exe/cmd 会弹 SmartScreen 或"打开文件-安全警告"：
+**大多数情况下，从 GitHub 下载 zip、解压后直接双击 `install.cmd` 就能装，不会弹提示。**
+
+只有下面两种情况才可能被拦：
+
+- 文件带 **Mark-of-the-Web（"来自 Internet"标记）**：取决于浏览器/下载器/解压工具，可能带也可能不带；
+- exe 没做数字签名：SmartScreen 对未签名程序可能提示"未知发布者"。
+
+处理方式：
 
 | 方案 | 效果 | 成本 |
 |---|---|---|
-| 右键文件 → 属性 → 解除锁定（或 `Unblock-File`） | 只对**本机、本次**有效，不弹"打开文件-安全警告" | 免费 |
+| 右键文件 → 属性 → **常规页最下方**勾选「解除锁定」（或 `Unblock-File`） | 该选项**只在文件带 MOTW 时出现**；仅对**本机**有效 | 免费 |
 | 代码签名证书（OV/EV）签名 exe + cmd | 对所有用户都不提示 | 约 $100–400/年 |
 | 自签名证书 + 导入"受信任的根证书颁发机构" | 只对你自己的电脑有效 | 免费，但不适合分发 |
 | 上架 Microsoft Store | 不提示 | 需开发者账号 |
 
-`scripts\` 里提供 `sign-self.cmd`（自签名，仅本机）与 `unblock-files.ps1`（批量解除锁定）。
+`scripts\` 里提供 `sign-self.cmd`（自签名，仅本机）与 `unblock-files.ps1`（批量解除锁定，**仅在确实遇到 MOTW 提示时**才需要）。
 
 ## 许可
 代码 MIT。精灵素材版权归原作者（@linxin666），请勿单独再分发素材。
