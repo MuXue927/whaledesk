@@ -373,6 +373,19 @@ internal static class SelfTest
                 .All(LineBank.Has),
             "every new interaction has its own lines");
 
+        // ---------- Update checker: proxy + tag parsing (no network) ----------
+        var proxyA = UpdateChecker.NormaliseProxy("127.0.0.1:7897");
+        var proxyB = UpdateChecker.NormaliseProxy("http=127.0.0.1:7890;https=127.0.0.1:7897");
+        Check("update-proxy-normalise",
+            proxyA == "http://127.0.0.1:7897/" && proxyB == "http://127.0.0.1:7897/",
+            $"a={proxyA} b={proxyB}");
+
+        var tagFromUrl = UpdateChecker.ExtractTag("https://github.com/MuXue927/whaledesk/releases/tag/v0.24.3");
+        var tagFromHtml = UpdateChecker.ExtractTag("<a href=\"/MuXue927/whaledesk/releases/tag/v0.24.3\">x</a>");
+        Check("update-tag-extract",
+            UpdateChecker.ParseTag(tagFromUrl) == new Version(0, 24, 3) &&
+            UpdateChecker.ParseTag(tagFromHtml) == new Version(0, 24, 3),
+            $"url={tagFromUrl} html={tagFromHtml}");
         // ---------- P3: monitoring ----------
         var engineInstance = "pid_17296_luid_0x00000000_0x0000dc14_phys_0_eng_0_engtype_3d";
         Check("gpu-engine-type-parse",
@@ -659,7 +672,6 @@ internal static class SelfTest
             Performance.DiskGuard.Tier(2_000_000_000UL, 40_000_000_000UL) == 3,
             "30%/12.5%/7.5%/4%/30%(绝对)/5% -> 0/1/2/3/1/3");
 
-        // ---------- P3: drag & drop formatting ----------
         var oneFile = new[] { @"C:\Users\me\Downloads\report.pdf" };
         var twoFiles = new[] { @"C:\Users\me\a.txt", @"C:\Users\me\b.txt" };
         Check("droptargets-preview",
@@ -674,7 +686,6 @@ internal static class SelfTest
             Interaction.DropTargets.NameOf(@"C:\x\y\") == "y",
             "多路径 CRLF 连接 / 文字原样 / 目录名去尾斜杠");
 
-        // ---------- P3: quick launch store ----------
         var qaRoot = Path.Combine(opts.BuildDir, "verify", "qa");
         try
         {
@@ -693,7 +704,6 @@ internal static class SelfTest
         {
             try { Directory.Delete(qaRoot, true); } catch { }
         }
-        // ---------- P3: launcher entries can be removed; shells start in the profile ----------
         var qa2 = Interaction.LauncherStore.Defaults();
         var ps = qa2.Visible().FirstOrDefault(l => l.Target.StartsWith("powershell", StringComparison.OrdinalIgnoreCase));
         var profilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -706,7 +716,6 @@ internal static class SelfTest
             ps is not null && ps.WorkingDirectory == profilePath,
             $"移除前 {before} 项、移除后 {qa2.Visible().Count} 项; PowerShell 起始目录={ps?.WorkingDirectory ?? "未设置"}");
 
-        // ---------- P3: copy-to-folder auto rename + legacy launcher migration ----------
         var copyRoot = Path.Combine(opts.BuildDir, "verify", "copy");
         try
         {
@@ -736,7 +745,6 @@ internal static class SelfTest
         {
             try { Directory.Delete(copyRoot, true); } catch { }
         }
-        // ---------- P3: space analysis classification ----------
         var cacheVerdict = Cleanup.DirectoryAnalyzer.Classify("Code Cache", true, out _);
         var gpuVerdict = Cleanup.DirectoryAnalyzer.Classify("GPUCache", true, out _);
         var logFileVerdict = Cleanup.DirectoryAnalyzer.Classify("app.log", false, out _);
@@ -781,7 +789,6 @@ internal static class SelfTest
             try { Directory.Delete(analysisRoot, true); } catch { }
         }
 
-        // ---------- P3: "in use" and "keep" override the analyzer ----------
         var keeplistRoot = Path.Combine(opts.BuildDir, "verify", "keeplist");
         try
         {
@@ -822,7 +829,6 @@ internal static class SelfTest
         {
             try { Directory.Delete(keeplistRoot, true); } catch { }
         }
-        // ---------- P3: ignore list, deep scan, guarded cleaner ----------
         var deepRoot = Path.Combine(opts.BuildDir, "verify", "deep");
         try
         {
@@ -868,7 +874,6 @@ internal static class SelfTest
         {
             try { Directory.Delete(deepRoot, true); } catch { }
         }
-        // ---------- P3: sedentary reminder ----------
         var sed = new Interaction.SedentaryWatch { RemindAfterMinutes = 50, BreakIdleSeconds = 300, SnoozeMinutes = 30, ActiveIdleSeconds = 60 };
         long t0 = 10_000_000;
         Interaction.SedentaryNudge? firstNudge = null;
@@ -884,7 +889,6 @@ internal static class SelfTest
             firstNudge is { ActiveMinutes: >= 50 } && afterNudge is null && afterBreak is null && offHours is null,
             $"首次提醒 {firstNudge?.ActiveMinutes} 分钟; 冷却期内={afterNudge is null}; 休息后清零={afterBreak is null}; 凌晨不提醒={offHours is null}");
 
-        // ---------- P3: clipboard history ----------
         var clipPath = Path.Combine(opts.BuildDir, "verify", "clip-history.json");
         var hist = new Interaction.ClipboardHistoryStore { Capacity = 5 };
         hist.Add("first", DateTime.Now);

@@ -16,20 +16,26 @@ internal sealed partial class PetWindow
     {
         _lastUpdateCheckMs = Environment.TickCount64;
         var current = typeof(PetWindow).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
-        var (info, error) = await UpdateChecker.CheckAsync(UpdateRepo, current).ConfigureAwait(true);
-        if (info is null)
+        var result = await UpdateChecker.CheckAsync(UpdateRepo, current).ConfigureAwait(true);
+        if (result.Info is null)
         {
-            _log.Info(error is null
-                ? $"update check: up to date ({current})"
-                : $"update check failed: {error}");
-            if (!silent) ShowLocalBubble(error is null ? "已经是最新版本啦" : $"检查更新失败：{error}", 4000, force: true);
+            if (result.Error is null)
+            {
+                _log.Info($"update check: up to date ({current}) proxy={result.ProxyUsed} attempts={result.Attempts}");
+                if (!silent) ShowLocalBubble("已经是最新版本啦", 4000, force: true);
+            }
+            else
+            {
+                _log.Warn($"update check failed: {result.Error} | proxy={result.ProxyUsed} | attempts={result.Attempts} | detail={result.Detail}");
+                if (!silent) ShowLocalBubble($"{result.Error}（不影响使用，可右键 → 打开发布页）", 6000, force: true);
+            }
             return;
         }
 
-        _updateAvailableTag = info.LatestTag;
-        _log.Info($"update available: {info.LatestTag} (current {current}) {info.ReleaseUrl}");
-        ShowLocalBubble($"有新版本 {info.LatestTag} 啦，右键 → 检查更新 可打开下载页", 9000, force: true);
-        if (!silent) OpenReleasePage(info.ReleaseUrl);
+        _updateAvailableTag = result.Info.LatestTag;
+        _log.Info($"update available: {result.Info.LatestTag} (current {current}) {result.Info.ReleaseUrl} proxy={result.ProxyUsed} attempts={result.Attempts}");
+        ShowLocalBubble($"有新版本 {result.Info.LatestTag} 啦，右键 → 检查更新 可打开下载页", 9000, force: true);
+        if (!silent) OpenReleasePage(result.Info.ReleaseUrl);
     }
 
     private void OpenReleasePage(string url)
@@ -51,12 +57,13 @@ internal sealed partial class PetWindow
         await Task.Delay(600);
         var current = typeof(PetWindow).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
         _log.Info($"UPDATE PROBE current={current} repo={UpdateRepo}");
-        var (info, error) = await UpdateChecker.CheckAsync(UpdateRepo, current, timeoutMs: 6000).ConfigureAwait(true);
-        _log.Info(error is not null
-            ? $"UPDATE PROBE result=unreachable error={error}"
-            : info is null
+        var result = await UpdateChecker.CheckAsync(UpdateRepo, current, timeoutMs: 12000).ConfigureAwait(true);
+        _log.Info($"UPDATE PROBE proxy={result.ProxyUsed} attempts={result.Attempts}");
+        _log.Info(result.Error is not null
+            ? $"UPDATE PROBE result=unreachable error={result.Error} detail={result.Detail}"
+            : result.Info is null
                 ? "UPDATE PROBE result=up-to-date"
-                : $"UPDATE PROBE result=newer tag={info.LatestTag} url={info.ReleaseUrl}");
+                : $"UPDATE PROBE result=newer tag={result.Info.LatestTag} url={result.Info.ReleaseUrl}");
     }
 
     /// <summary>--probe-clipboard-image: put a synthetic bitmap on the clipboard and prove it is stored.</summary>

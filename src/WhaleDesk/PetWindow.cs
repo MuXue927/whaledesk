@@ -1131,6 +1131,7 @@ internal sealed partial class PetWindow : Window
             new("没找到 DSH 怎么办…", ShowDshGuide),
             new("插件体检…", ShowPluginHelper),
             new(_updateAvailableTag is null ? "检查更新" : $"检查更新（发现 {_updateAvailableTag}）", () => _ = CheckUpdateAsync(silent: false)),
+            new("打开发布页", () => OpenReleasePage($"https://github.com/{UpdateRepo}/releases/latest")),
         };
 
         var sections = new List<MenuSection>
