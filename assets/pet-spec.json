@@ -1,0 +1,206 @@
+{
+  "id": "whale-girl-refined",
+  "displayName": "鲸鱼娘（精致版）",
+  "description": "基于鲸鱼娘形象进行 AI 辅助二次创作、修复与细节精修的内置变体。",
+  "renderer": "sprite2d",
+  "cell": {
+    "width": 192,
+    "height": 208
+  },
+  "columns": 8,
+  "rows": [
+    6,
+    8,
+    8,
+    4,
+    5,
+    8,
+    6,
+    6,
+    6
+  ],
+  "atlasRows": 9,
+  "tracks": {
+    "idle": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "durations": [
+        500,
+        500,
+        600,
+        500,
+        500,
+        600
+      ],
+      "loop": true
+    },
+    "running-right": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "durations": [
+        300,
+        300,
+        300,
+        300,
+        300,
+        300,
+        300,
+        400
+      ],
+      "loop": true
+    },
+    "running-left": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "durations": [
+        300,
+        300,
+        300,
+        300,
+        300,
+        300,
+        300,
+        400
+      ],
+      "loop": true
+    },
+    "waving": {
+      "frames": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "durations": [
+        450,
+        450,
+        450,
+        450
+      ],
+      "loop": true
+    },
+    "jumping": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "durations": [
+        400,
+        400,
+        400,
+        450,
+        450
+      ],
+      "loop": false,
+      "fallback": "idle"
+    },
+    "failed": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "durations": [
+        550,
+        550,
+        550,
+        600,
+        650,
+        700,
+        550,
+        550
+      ],
+      "loop": false,
+      "fallback": "idle"
+    },
+    "waiting": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "durations": [
+        550,
+        550,
+        600,
+        550,
+        550,
+        600
+      ],
+      "loop": true
+    },
+    "running": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "durations": [
+        330,
+        330,
+        330,
+        330,
+        330,
+        400
+      ],
+      "loop": true
+    },
+    "review": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "durations": [
+        650,
+        650,
+        650,
+        650,
+        650,
+        650
+      ],
+      "loop": true
+    }
+  },
+  "atlasUrl": "/pet/whale-girl-refined/spritesheet.webp",
+  "manifestUrl": "/pet/whale-girl-refined/pet.json"
+}

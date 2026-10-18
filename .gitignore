@@ -1,0 +1,10 @@
+bin/
+obj/
+dist/
+dist-selfcontained/
+release/
+build/
+*.user
+*.log
+state/
+.nuget/
