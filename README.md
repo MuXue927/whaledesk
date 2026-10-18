@@ -1,5 +1,7 @@
 # WhaleDesk 小鲸娘桌面伴侣
 
+[![Release v0.24.1](https://img.shields.io/github/v/release/MuXue927/whaledesk?label=release&color=2ea44f)](https://github.com/MuXue927/whaledesk/releases/tag/v0.24.1)
+
 一个 .NET 9 WPF 桌面宠物：住在桌面右下角，陪你看 DSH 会话状态、监控内存/磁盘/GPU、
 做 C 盘清理与空间分析，还有跟随光标、专注番茄钟、剪贴板历史、久坐提醒等小功能。
 
