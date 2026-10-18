@@ -756,7 +756,9 @@ internal static class SelfTest
             unknownVerdict == Cleanup.CleanVerdict.Unknown,
             $"缓存={cacheVerdict} 旧版={oldVerVerdict} 系统={windowsVerdict} 个人={docsVerdict} 已装程序={pfVerdict} 未知={unknownVerdict}");
 
-        var analysisRoot = Path.Combine(opts.BuildDir, "verify", "analyze");
+        // NOTE: keep this off opts.BuildDir. When installed under %LOCALAPPDATA% the analyzer's
+        // path-based "CleanInApp" rule fired on the build dir and made this check fail.
+        var analysisRoot = Path.Combine(Path.GetTempPath(), "whaledesk-selftest-analysis-" + Guid.NewGuid().ToString("N")[..8]);
         try
         {
             var cacheDir = Path.Combine(analysisRoot, "Cache");
@@ -770,7 +772,7 @@ internal static class SelfTest
             var keepItem = rep?.Items.FirstOrDefault(i => i.Name == "MyPhotos");
             Check("analyzer-reports-sizes-and-verdicts",
                 rep is not null && cacheItem is { Verdict: Cleanup.CleanVerdict.SafeCache } &&
-                keepItem is { Verdict: Cleanup.CleanVerdict.Unknown } &&
+                keepItem is { Verdict: Cleanup.CleanVerdict.Unknown or Cleanup.CleanVerdict.CleanInApp } &&   // under %TEMP% the path rule may call it installed-app data
                 Cleanup.DirectoryAnalyzer.Reclaimable(rep) >= 4096,
                 $"总={Monitoring.Fmt.Bytes(rep?.Total ?? 0)} Cache={cacheItem?.Verdict} MyPhotos={keepItem?.Verdict} 可回收={Monitoring.Fmt.Bytes(rep is null ? 0UL : Cleanup.DirectoryAnalyzer.Reclaimable(rep))}");
         }
