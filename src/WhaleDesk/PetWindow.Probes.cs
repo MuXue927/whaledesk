@@ -869,4 +869,10 @@ internal sealed partial class PetWindow
         await Task.Delay(9000);
     }
 
+    /// <summary>--probe-cleanup-tools: print the resolved npm/pnpm command without deleting anything.</summary>
+    private async Task RunCleanupToolsProbeAsync()
+    {
+        await Task.Delay(600);
+        _log.Info("CLEANUP TOOLS " + WhaleDesk.Cleanup.CleanupRunner.DescribeResolvedTools());
+    }
 }

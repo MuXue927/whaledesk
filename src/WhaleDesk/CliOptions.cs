@@ -26,6 +26,8 @@ internal sealed class CliOptions
     public bool ProbeExtras { get; private set; }
     public bool ProbeFollow { get; private set; }
     public bool ProbeUpdate { get; private set; }
+    /// <summary>Print which command the command-based cleanups (npm/pnpm) would use.</summary>
+    public bool ProbeCleanupTools { get; private set; }
     public bool ProbeClipboardImage { get; private set; }
     public bool ProbeClipboard { get; private set; }
     public bool ProbeFocus { get; private set; }
@@ -122,6 +124,7 @@ internal sealed class CliOptions
         case "--probe-extras": o.ProbeExtras = true; break;
         case "--probe-follow": o.ProbeFollow = true; break;
         case "--probe-update": o.ProbeUpdate = true; break;
+        case "--probe-cleanup-tools": o.ProbeCleanupTools = true; break;
         case "--probe-clipboard": o.ProbeClipboard = true; break;
         case "--probe-clipboard-image": o.ProbeClipboardImage = true; break;
         case "--probe-focus": o.ProbeFocus = true; break;

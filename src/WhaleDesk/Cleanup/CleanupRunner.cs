@@ -350,7 +350,9 @@ internal static class CleanupRunner
             _ => (null, null),
         };
         if (file is null || args is null)
-            return new CleanupResult(target.Id, 0, 0, 0, "找不到对应的命令行工具，未执行", null);
+            return new CleanupResult(target.Id, 0, 0, 0, target.Id == "npm-cache"
+                ? "找不到 npm：未安装 Node.js 或不在 PATH。请在终端运行：npm cache clean --force"
+                : "找不到 pnpm：未安装或不在 PATH。请在终端运行：pnpm store prune", null);
 
         try
         {
@@ -367,7 +369,7 @@ internal static class CleanupRunner
             var output = proc.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd();
             if (!proc.WaitForExit(120_000)) { try { proc.Kill(true); } catch { } return new CleanupResult(target.Id, 0, 0, 0, "命令超时", output); }
             var tail = output.Length > 400 ? output[^400..] : output;
-            log.Info($"cleanup {target.Id}: {file} exited {proc.ExitCode}");
+            log.Info($"cleanup {target.Id}: {file} {string.Join(" ", args)} exited {proc.ExitCode}");
             return new CleanupResult(target.Id, 0, 0, 0, proc.ExitCode == 0 ? null : $"命令退出码 {proc.ExitCode}", tail.Replace("\r", " ").Replace("\n", " "));
         }
         catch (Exception ex)
@@ -376,22 +378,117 @@ internal static class CleanupRunner
         }
     }
 
-    /// <summary>Locate npm/pnpm next to the DSH runtime or on PATH — a GUI app has no shell PATH.</summary>
+    /// <summary>
+    /// Locate npm/pnpm. Order: PATH (a normal user has Node there) → DSH runtime → well-known
+    /// install dirs. The old version only looked inside the DSH runtime, so a system-wide Node
+    /// install (e.g. D:\Software\nodejs) made "npm 缓存" fail with "找不到对应的命令行工具".
+    /// </summary>
     private static (string? File, string[]? Args) ResolveNpm()
     {
-        var node = FindRuntimeTool("node", "node.exe");
-        if (node is null) return (null, null);
-        var npmCli = Path.Combine(Path.GetDirectoryName(node)!, "node_modules", "npm", "bin", "npm-cli.js");
-        if (!File.Exists(npmCli)) return (null, null);
-        return (node, new[] { npmCli, "cache", "clean", "--force" });
+        var node = FindTool("node.exe");
+        var npmCli = FindNpmCli(node);
+        if (node is not null && npmCli is not null)
+            return (node, new[] { npmCli, "cache", "clean", "--force" });
+
+        // npm.cmd (global install / fnm / nvm / volta shims) — run it through cmd.exe.
+        var npmCmd = FindTool("npm.cmd");
+        if (npmCmd is not null)
+            return (ComSpec, new[] { "/d", "/s", "/c", $"\"{npmCmd}\" cache clean --force" });
+
+        return (null, null);
     }
 
     private static (string? File, string[]? Args) ResolvePnpm()
     {
-        var node = FindRuntimeTool("node", "node.exe");
-        var pnpm = FindRuntimeTool("pnpm", Path.Combine("pnpm", "bin", "pnpm.mjs"));
-        if (node is null || pnpm is null) return (null, null);
-        return (node, new[] { pnpm, "store", "prune" });
+        var node = FindTool("node.exe");
+        var pnpmMjs = FindRuntimeTool("pnpm", Path.Combine("pnpm", "bin", "pnpm.mjs"));
+        if (node is not null && pnpmMjs is not null)
+            return (node, new[] { pnpmMjs, "store", "prune" });
+
+        var pnpmCmd = FindTool("pnpm.cmd");
+        if (pnpmCmd is not null)
+            return (ComSpec, new[] { "/d", "/s", "/c", $"\"{pnpmCmd}\" store prune" });
+
+        return (null, null);
+    }
+
+    /// <summary>Diagnostics for --probe-cleanup-tools: what command would be used, without running it.</summary>
+    internal static string DescribeResolvedTools()
+    {
+        var (npmFile, npmArgs) = ResolveNpm();
+        var (pnpmFile, pnpmArgs) = ResolvePnpm();
+        return $"npm={(npmFile is null ? "NOT FOUND" : npmFile + " " + string.Join(" ", npmArgs ?? Array.Empty<string>()))} | " +
+               $"pnpm={(pnpmFile is null ? "NOT FOUND" : pnpmFile + " " + string.Join(" ", pnpmArgs ?? Array.Empty<string>()))} | " +
+               $"pathDirs={string.Join(";", PathDirs())}";
+    }
+
+    private static string ComSpec => Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
+
+    /// <summary>npm-cli.js lives next to node.exe for a normal install; also probe PATH dirs and %APPDATA%\npm.</summary>
+    private static string? FindNpmCli(string? node)
+    {
+        var candidates = new List<string>();
+        if (node is not null)
+        {
+            var dir = Path.GetDirectoryName(node)!;
+            candidates.Add(Path.Combine(dir, "node_modules", "npm", "bin", "npm-cli.js"));
+            candidates.Add(Path.Combine(dir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"));
+        }
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        candidates.Add(Path.Combine(appData, "npm", "node_modules", "npm", "bin", "npm-cli.js"));
+        foreach (var dir in PathDirs())
+            candidates.Add(Path.Combine(dir, "node_modules", "npm", "bin", "npm-cli.js"));
+        foreach (var candidate in candidates)
+        {
+            try { if (File.Exists(Path.GetFullPath(candidate))) return Path.GetFullPath(candidate); }
+            catch { }
+        }
+        return null;
+    }
+
+    /// <summary>Find an executable by name: PATH first, then common Node dirs and the DSH runtime.</summary>
+    private static string? FindTool(string fileName)
+    {
+        foreach (var dir in PathDirs())
+        {
+            var candidate = Path.Combine(dir, fileName);
+            try { if (File.Exists(candidate)) return candidate; } catch { }
+        }
+
+        if (fileName.Equals("node.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            var runtimeNode = FindRuntimeTool("node", Path.Combine("bin", "node.exe")) ?? FindRuntimeTool("node", "node.exe");
+            if (runtimeNode is not null) return runtimeNode;
+        }
+
+        foreach (var common in CommonNodeDirs())
+        {
+            var candidate = Path.Combine(common, fileName);
+            try { if (File.Exists(candidate)) return candidate; } catch { }
+        }
+        return null;
+    }
+
+    private static IEnumerable<string> PathDirs()
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var raw in path.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var dir = raw.Trim('"');
+            if (dir.Length > 0) yield return dir;
+        }
+    }
+
+    private static IEnumerable<string> CommonNodeDirs()
+    {
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        yield return Path.Combine(programFiles, "nodejs");
+        yield return Path.Combine(localAppData, "Programs", "nodejs");
+        yield return Path.Combine(appData, "npm");
+        yield return Path.Combine(localAppData, "Volta", "bin");
+        yield return Path.Combine(appData, "fnm");
     }
 
     private static string? FindRuntimeTool(string folder, string relative)

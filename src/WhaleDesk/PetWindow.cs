@@ -655,6 +655,7 @@ internal sealed partial class PetWindow : Window
         if (_opts.ProbeExtras) _ = RunExtrasProbeAsync();
         if (_opts.ProbeFollow) _ = RunFollowProbeAsync();
         if (_opts.ProbeUpdate) _ = RunUpdateProbeAsync();
+        if (_opts.ProbeCleanupTools) _ = RunCleanupToolsProbeAsync();
         if (_opts.ProbeClipboardImage) _ = RunClipboardImageProbeAsync();
         if (_opts.ProbeClipboard) _ = RunClipboardProbeAsync();
         if (_opts.ProbeDshGuide) _ = RunDshGuideProbeAsync();
