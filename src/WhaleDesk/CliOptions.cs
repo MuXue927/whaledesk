@@ -20,6 +20,12 @@ internal sealed class CliOptions
     public bool ProbePlugins { get; private set; }
     /// <summary>Override the DSH loopback base URL (tests / non-default ports).</summary>
     public string? DshBase { get; private set; }
+    /// <summary>
+    /// Testing only: keep the configured base even when it stops answering. --probe-hotplug needs
+    /// this to watch the SAME endpoint die and come back; with discovery on, a second live DSH on
+    /// the machine is found and the probe would silently measure that one instead.
+    /// </summary>
+    public bool NoDiscovery { get; private set; }
     /// <summary>End-to-end recovery test against a stub server (DSH restart / plugin reload).</summary>
     public bool ProbeHotplug { get; private set; }
     /// <summary>Log the cursor-follow / focus-quiet policies without moving anything.</summary>
@@ -132,6 +138,7 @@ internal sealed class CliOptions
         case "--dsh-base":
             if (i + 1 < args.Length) { o.DshBase = args[++i]; }
             break;
+        case "--no-discovery": o.NoDiscovery = true; break;
         case "--probe-plugins": o.ProbePlugins = true; break;
         case "--probe-menu": o.ProbeMenu = true; break;
         case "--probe-menu-monitor":
@@ -190,6 +197,7 @@ internal sealed class CliOptions
                  [--probe-dsh]      exercise open/start DSH and log every candidate mechanism
                  [--probe-spawn]    log this process integrity/token and a control child spawn
           --quit                  ask a running pet to exit (used by the installer)
+          --no-discovery          testing only: never look for a different DSH port
           --allow-multiple        testing only: start even if another pet is running
           --no-tray               do not create the tray icon
           --reset-position        ignore the saved position and dock bottom-right

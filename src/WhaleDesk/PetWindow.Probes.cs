@@ -172,6 +172,14 @@ internal sealed partial class PetWindow
                 if (initial) _log.Info($"DSH endpoint confirmed: {found}");
                 return;
             }
+            // 探测一个候选要好几百毫秒：等它答话时，原来那个端点可能已经自己回来了（DSH 正好在
+            // 重启）。此时屏幕上的 base 是好的，探到的只是"另一台还在跑的 DSH"，不该把用户那个
+            // 端点顶掉 —— 实测就发生过：--probe-hotplug 的 stub 刚恢复，base 被抢到真实 DSH。
+            if (_state.ConsecutiveFailures == 0)
+            {
+                _log.Info($"DSH endpoint discovery: keeping {_dshBase} (it answered again before {found} was tried)");
+                return;
+            }
             _dshBase = found;
             _ui.DshBaseUrl = found;
             Persist();

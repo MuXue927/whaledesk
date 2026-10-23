@@ -99,17 +99,45 @@ internal static class App
                             () => window.Dispatcher.BeginInvoke(new Action(() => window.QuitGracefully("quit request")), System.Windows.Threading.DispatcherPriority.Normal));
                     // A desktop pet must never die from one bad callback: log, keep
                     // running, and only give up if the failures are relentless.
+                    // "Relentless" used to be a plain lifetime counter (>5 ever): a handful
+                    // of unrelated hiccups spread over months could one day make her vanish
+                    // without a word. Count inside a 10 minute window instead - the window
+                    // starts at the first counted exception and is dropped as soon as another
+                    // exception arrives after it expired, so sporadic failures never add up.
+                    const int uiErrorLimit = 6;
+                    const long uiErrorWindowMs = 10 * 60 * 1000;    // 10 min
                     var errorCount = 0;
+                    var errorWindowStart = Environment.TickCount64;
+                    var givingUp = false;
                     app.DispatcherUnhandledException += (_, e) =>
                     {
-                        errorCount++;
-                        log.Error($"unhandled UI exception #{errorCount}: {e.Exception}");
                         e.Handled = true;
-                        if (errorCount > 5)
+                        if (givingUp) return;   // already shutting down: the rest is noise
+                        var now = Environment.TickCount64;
+                        if (now - errorWindowStart > uiErrorWindowMs)
                         {
-                            log.Error("too many UI exceptions - closing the pet window");
-                            window.FinishAndClose();
+                            if (errorCount > 0)
+                                log.Info($"UI exception window reset (the previous {errorCount} were older than 10 minutes)");
+                            errorCount = 0;
+                            errorWindowStart = now;
                         }
+                        errorCount++;
+                        log.Error($"unhandled UI exception #{errorCount} in this 10 minute window: {e.Exception}");
+                        if (errorCount < uiErrorLimit)
+                        {
+                            // User visible signal (status-bar / log level, no dialog): say
+                            // that something went wrong and how many more it takes.
+                            log.Warn($"小鲸娘刚才有一步操作出了问题（10 分钟内第 {errorCount} 次），已经带过去了；"
+                                     + $"同一时间段里再出现 {uiErrorLimit - errorCount} 次，她会自己关掉自己。"
+                                     + "如果是反复出现，可以把日志发给开发者。");
+                            // 让用户真的看得见：原来这条只落在日志里，宠物消失时用户毫无线索。
+                            try { window.ShowNotice($"刚才有一步操作出了点问题（10 分钟内第 {errorCount} 次），已经带过去了"); }
+                            catch { /* the notice itself must never throw */ }
+                            return;
+                        }
+                        log.Error($"{errorCount} UI exceptions within 10 minutes (> {uiErrorLimit - 1}) - closing the pet window");
+                        givingUp = true;
+                        window.FinishAndClose();
                     };
                     AppDomain.CurrentDomain.UnhandledException += (_, e) =>
                         log.Error("unhandled domain exception: " + e.ExceptionObject);

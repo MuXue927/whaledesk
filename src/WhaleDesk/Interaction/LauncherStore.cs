@@ -40,6 +40,7 @@ internal sealed class LauncherStore
     /// <summary>Load from disk; a missing or corrupt file yields the defaults instead of failing.</summary>
     public static LauncherStore Load(string path)
     {
+        var unreadable = false;
         try
         {
             if (File.Exists(path))
@@ -67,11 +68,39 @@ internal sealed class LauncherStore
         }
         catch
         {
-            // fall through to defaults
+            // 用户是拿记事本手改这个文件的（启动器窗口自带「编辑配置」按钮），少个逗号属于正常
+            // 编辑失误而不是"配置损坏"。v0.24.4 在这里直接 fall through 到默认值，并且紧接着
+            // Save() 把默认值写回原文件 —— 用户手写的那份就永久没了。现在：留备份、不覆盖。
+            unreadable = true;
         }
         var store = Defaults();
+        if (unreadable)
+        {
+            Quarantine(path);
+            return store;   // 不写盘：用户还能打开原文件把逗号补上
+        }
         try { store.Save(path); } catch { /* read-only location: still usable in memory */ }
         return store;
+    }
+
+    /// <summary>
+    /// 最近一次 Load() 因为文件读不懂而另存的备份路径（null = 没有发生）。
+    /// 调用方可以据此提示用户，而不是让配置"悄悄变回默认值"。
+    /// </summary>
+    public static string? LastRecoveryBackup { get; private set; }
+
+    private static void Quarantine(string path)
+    {
+        try
+        {
+            var backup = $"{path}.broken-{DateTime.Now:yyyyMMdd-HHmmss}";
+            File.Copy(path, backup, overwrite: true);
+            LastRecoveryBackup = backup;
+        }
+        catch
+        {
+            LastRecoveryBackup = null;
+        }
     }
 
     public void Save(string path)

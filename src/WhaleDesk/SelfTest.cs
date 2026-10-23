@@ -21,6 +21,39 @@ internal static class SelfTest
             else { failed++; log.Error($"selftest FAIL {name}: {detail}"); }
         }
 
+        // A throwaway directory for checks that need real files on disk (the build-output rules read
+        // the file system). Tries each root in turn and returns null when none accepts a write, so a
+        // sandboxed run reports one FAIL instead of dying with an uncaught exception.
+        string? NewProbeDir(string name, params string[] roots)
+        {
+            foreach (var root in roots)
+            {
+                if (string.IsNullOrWhiteSpace(root)) continue;
+                try
+                {
+                    var dir = Path.Combine(root, name);
+                    Directory.CreateDirectory(dir);
+                    return dir;
+                }
+                catch
+                {
+                    // not writable here: try the next root
+                }
+            }
+            return null;
+        }
+
+        // The pet runs at Low integrity inside the DSH sandbox: %TEMP%/%LOCALAPPDATA% are Medium IL,
+        // so the ONLY writable place is the workspace. Every on-disk probe therefore lives under the
+        // build dir - and that root happens to sit inside the user's Documents/OneDrive, which the
+        // analyzer (correctly) protects. Checks that depend on a path-based verdict detect that and
+        // assert the underlying predicate instead, with an explicit "selftest SKIP" line in the log.
+        var probeRoots = new[]
+        {
+            Path.Combine(opts.BuildDir, "verify"),
+            Path.Combine(opts.Root, "build", "verify"),
+        };
+
         var problems = spec.Validate();
         Check("spec-contract", problems.Count == 0,
             problems.Count == 0 ? $"{spec.Tracks.Count} tracks x {spec.Columns} columns, cell {spec.CellWidth}x{spec.CellHeight}"
@@ -764,29 +797,146 @@ internal static class SelfTest
             unknownVerdict == Cleanup.CleanVerdict.Unknown,
             $"缓存={cacheVerdict} 旧版={oldVerVerdict} 系统={windowsVerdict} 个人={docsVerdict} 已装程序={pfVerdict} 未知={unknownVerdict}");
 
-        // NOTE: keep this off opts.BuildDir. When installed under %LOCALAPPDATA% the analyzer's
-        // path-based "CleanInApp" rule fired on the build dir and made this check fail.
-        var analysisRoot = Path.Combine(Path.GetTempPath(), "whaledesk-selftest-analysis-" + Guid.NewGuid().ToString("N")[..8]);
-        try
+        // B1 regression: a name is not evidence; the path decides. Each assertion below fails the
+        // moment the verdict falls back to "the name contains a cache word".
+        var cleanupLocalAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+        // Guards GB of UWP/store app data: one "clean safe items" click used to bin all of Packages.
+        var packagesVerdict = Cleanup.DirectoryAnalyzer.Classify("Packages", true, cleanupLocalAppData, null, out var packagesReason);
+        Check("analyzer-protects-appdata-packages",
+            packagesVerdict != Cleanup.CleanVerdict.SafeCache,
+            $"%LOCALAPPDATA%\\Packages -> {packagesVerdict}（{packagesReason}）");
+
+        // The other direction: a real cache under Temp must stay deletable (guard against over-blocking).
+        var tempCacheVerdict = Cleanup.DirectoryAnalyzer.Classify("一些缓存", true,
+            Path.Combine(cleanupLocalAppData, "Temp"), null, out var tempCacheReason);
+        Check("analyzer-keeps-temp-caches",
+            tempCacheVerdict == Cleanup.CleanVerdict.SafeCache,
+            $"%LOCALAPPDATA%\\Temp\\一些缓存 -> {tempCacheVerdict}（{tempCacheReason}）");
+
+        // Guards an installed program: VS Code's bin holds code.cmd, deleting it breaks the install.
+        var vsCodeBinVerdict = Cleanup.DirectoryAnalyzer.Classify("bin", true,
+            Path.Combine(cleanupLocalAppData, "Programs", "Microsoft VS Code"), null, out var vsCodeBinReason);
+        Check("analyzer-protects-installed-programs",
+            vsCodeBinVerdict != Cleanup.CleanVerdict.SafeCache,
+            $"...\\Programs\\Microsoft VS Code\\bin -> {vsCodeBinVerdict}（{vsCodeBinReason}）");
+
+        // bin/obj 只有看到构建产物才算缓存（B1）。这条判定要读真实文件，所以在一棵自己新建的探针树里造数据：
+        // 先建目录再写文件；探针根只能用工作区（Low 完整性级别写不了 %TEMP%），而工作区处在用户的
+        // 文档/OneDrive 下会被判定拦成 PersonalFiles —— 那时改断言下面的证据函数本身，并打一条 SKIP，
+        // 不假装 SafeCache 那条测到了。整段 try/catch/finally：失败只报一条 FAIL，不 fatal，也不留残留。
+        var buildProbe = NewProbeDir("whaledesk-selftest-build-" + Guid.NewGuid().ToString("N")[..8], probeRoots);
+        if (buildProbe is null)
         {
-            var cacheDir = Path.Combine(analysisRoot, "Cache");
-            var keepDir = Path.Combine(analysisRoot, "MyPhotos");
-            Directory.CreateDirectory(cacheDir);
-            Directory.CreateDirectory(keepDir);
-            File.WriteAllBytes(Path.Combine(cacheDir, "blob.bin"), new byte[4096]);
-            File.WriteAllBytes(Path.Combine(keepDir, "IMG_0001.jpg"), new byte[8192]);
-            var rep = Cleanup.DirectoryAnalyzer.Analyze(analysisRoot, 10, 8000);
-            var cacheItem = rep?.Items.FirstOrDefault(i => i.Name == "Cache");
-            var keepItem = rep?.Items.FirstOrDefault(i => i.Name == "MyPhotos");
-            Check("analyzer-reports-sizes-and-verdicts",
-                rep is not null && cacheItem is { Verdict: Cleanup.CleanVerdict.SafeCache } &&
-                keepItem is { Verdict: Cleanup.CleanVerdict.Unknown or Cleanup.CleanVerdict.CleanInApp } &&   // under %TEMP% the path rule may call it installed-app data
-                Cleanup.DirectoryAnalyzer.Reclaimable(rep) >= 4096,
-                $"总={Monitoring.Fmt.Bytes(rep?.Total ?? 0)} Cache={cacheItem?.Verdict} MyPhotos={keepItem?.Verdict} 可回收={Monitoring.Fmt.Bytes(rep is null ? 0UL : Cleanup.DirectoryAnalyzer.Reclaimable(rep))}");
+            Check("analyzer-build-output-evidence", false, "构建目录（工作区）不可写，建不出探针树");
         }
-        finally
+        else
         {
-            try { Directory.Delete(analysisRoot, true); } catch { }
+            try
+            {
+                // 有构建证据：同级 app.csproj + bin/Debug + obj/project.assets.json。
+                var projDir = Path.Combine(buildProbe, "withbuild", "proj");
+                var projObj = Path.Combine(projDir, "obj");
+                Directory.CreateDirectory(Path.Combine(projDir, "bin", "Debug"));   // 先建目录
+                Directory.CreateDirectory(projObj);
+                File.WriteAllText(Path.Combine(projDir, "app.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+                File.WriteAllText(Path.Combine(projObj, "project.assets.json"), "{}");
+
+                // 另一棵不同名字的树：名字像构建输出、但没有任何痕迹的业务目录。
+                var bizParent = Path.Combine(buildProbe, "nobuild", "业务模块");
+                Directory.CreateDirectory(Path.Combine(bizParent, "bin", "assets"));
+                Directory.CreateDirectory(Path.Combine(bizParent, "obj", "data"));
+                File.WriteAllText(Path.Combine(bizParent, "bin", "assets", "logo.png"), "x");
+                File.WriteAllText(Path.Combine(bizParent, "obj", "data", "schema.json"), "{}");
+
+                var probeProtected = Cleanup.DirectoryAnalyzer.TryGetProtectedVerdict(buildProbe, out _, out var probeProtectedReason);
+                if (probeProtected)
+                {
+                    // 探针根在受保护路径下：Classify 必然（且正确地）给出非 SafeCache，改断言证据函数。
+                    log.Info($"selftest SKIP analyzer-keeps-real-build-output（探测根位于受保护路径：{probeProtectedReason}）");
+                    var buildEvidence = Cleanup.DirectoryAnalyzer.LooksLikeBuildOutput(Path.Combine(projDir, "bin")) &&
+                                        Cleanup.DirectoryAnalyzer.LooksLikeBuildOutput(projObj) &&
+                                        !Cleanup.DirectoryAnalyzer.LooksLikeBuildOutput(Path.Combine(bizParent, "bin")) &&
+                                        !Cleanup.DirectoryAnalyzer.LooksLikeBuildOutput(Path.Combine(bizParent, "obj"));
+                    Check("analyzer-build-output-evidence", buildEvidence,
+                        "有 csproj/Debug/project.assets.json -> true；只有同名目录、没有痕迹 -> false");
+                }
+                else
+                {
+                    var realBin = Cleanup.DirectoryAnalyzer.Classify("bin", true, projDir, null, out _);
+                    var realObj = Cleanup.DirectoryAnalyzer.Classify("obj", true, projDir, null, out _);
+                    Check("analyzer-keeps-real-build-output",
+                        realBin == Cleanup.CleanVerdict.SafeCache && realObj == Cleanup.CleanVerdict.SafeCache,
+                        $"bin={realBin} obj={realObj}（同级有 csproj、obj 内有 project.assets.json）");
+                }
+
+                // 反例在任何位置都必须成立：受保护路径下它同样不是 SafeCache。
+                var fakeBin = Cleanup.DirectoryAnalyzer.Classify("bin", true, bizParent, null, out var fakeBinReason);
+                var fakeObj = Cleanup.DirectoryAnalyzer.Classify("obj", true, bizParent, null, out var fakeObjReason);
+                Check("analyzer-downgrades-unproven-bin-obj",
+                    fakeBin != Cleanup.CleanVerdict.SafeCache && fakeObj != Cleanup.CleanVerdict.SafeCache,
+                    $"无构建证据的 bin={fakeBin}（{fakeBinReason}）/ obj={fakeObj}（{fakeObjReason}）");
+            }
+            catch (Exception ex)
+            {
+                Check("analyzer-build-output-evidence", false, $"探针树操作失败：{ex.GetType().Name} {ex.Message}");
+            }
+            finally
+            {
+                try { Directory.Delete(buildProbe, true); } catch { }
+            }
+        }
+
+        // 受保护路径是"路径级"规则，与探测根无关：这条只看纯路径判定，工作区搬家不影响它。
+        var analysisRoot = NewProbeDir("whaledesk-selftest-analysis-" + Guid.NewGuid().ToString("N")[..8], probeRoots);
+        if (analysisRoot is null)
+        {
+            Check("analyzer-reports-sizes-and-verdicts", false, "构建目录（工作区）不可写，建不出分析探针树");
+        }
+        else
+        {
+            try
+            {
+                var cacheDir = Path.Combine(analysisRoot, "Cache");
+                var keepDir = Path.Combine(analysisRoot, "MyPhotos");
+                Directory.CreateDirectory(cacheDir);
+                Directory.CreateDirectory(keepDir);
+                File.WriteAllBytes(Path.Combine(cacheDir, "blob.bin"), new byte[4096]);
+                File.WriteAllBytes(Path.Combine(keepDir, "IMG_0001.jpg"), new byte[8192]);
+                var rep = Cleanup.DirectoryAnalyzer.Analyze(analysisRoot, 10, 8000);
+                var cacheItem = rep?.Items.FirstOrDefault(i => i.Name == "Cache");
+                var keepItem = rep?.Items.FirstOrDefault(i => i.Name == "MyPhotos");
+                if (Cleanup.DirectoryAnalyzer.IsProtectedPath(analysisRoot, out var analysisProtectedReason))
+                {
+                    // 探测根在自己的文档目录里：这里要保证的是"受保护目录里不给任何可删项"。
+                    // 「真缓存仍可删」由 analyzer-keeps-temp-caches 与 analyzer-build-output-evidence 覆盖。
+                    log.Info($"selftest SKIP analyzer-cache-is-deletable（探测根位于受保护路径：{analysisProtectedReason}）");
+                    Check("analyzer-reports-sizes-and-verdicts",
+                        rep is not null &&
+                        cacheItem is { Bytes: >= 4096 } && keepItem is { Bytes: >= 8192 } &&
+                        cacheItem.Verdict != Cleanup.CleanVerdict.SafeCache &&
+                        keepItem.Verdict != Cleanup.CleanVerdict.SafeCache &&
+                        Cleanup.DirectoryAnalyzer.Reclaimable(rep) == 0,
+                        $"总={Monitoring.Fmt.Bytes(rep?.Total ?? 0)} Cache={cacheItem?.Verdict} MyPhotos={keepItem?.Verdict} 可回收={Monitoring.Fmt.Bytes(rep is null ? 0UL : Cleanup.DirectoryAnalyzer.Reclaimable(rep))}（受保护根：必须为 0）");
+                }
+                else
+                {
+                    Check("analyzer-reports-sizes-and-verdicts",
+                        rep is not null &&
+                        cacheItem is { Bytes: >= 4096, Verdict: Cleanup.CleanVerdict.SafeCache } &&
+                        keepItem is { Bytes: >= 8192, Verdict: Cleanup.CleanVerdict.Unknown or Cleanup.CleanVerdict.CleanInApp } &&
+                        Cleanup.DirectoryAnalyzer.Reclaimable(rep) >= 4096,
+                        $"总={Monitoring.Fmt.Bytes(rep?.Total ?? 0)} Cache={cacheItem?.Verdict} MyPhotos={keepItem?.Verdict} 可回收={Monitoring.Fmt.Bytes(rep is null ? 0UL : Cleanup.DirectoryAnalyzer.Reclaimable(rep))}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Check("analyzer-reports-sizes-and-verdicts", false, $"分析探针树操作失败：{ex.GetType().Name} {ex.Message}");
+            }
+            finally
+            {
+                try { Directory.Delete(analysisRoot, true); } catch { }
+            }
         }
 
         var keeplistRoot = Path.Combine(opts.BuildDir, "verify", "keeplist");
@@ -816,14 +966,15 @@ internal static class SelfTest
                 googleItem is { Verdict: Cleanup.CleanVerdict.Kept },
                 "保留清单里的 Google -> " + (googleItem?.Verdict.ToString() ?? "null"));
 
+            // The InUse branch sits behind the path rules, and the only writable probe root is inside
+            // the user's Documents, where the protected-path gate answers first. So drive Classify with
+            // a synthetic AppData path that is outside every protected root: no disk access, same code.
             var evidence = new[] { new Performance.InUseEvidence("NetEase", "cloudmusic", @"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe") };
-            var inUse = Cleanup.DirectoryAnalyzer.Analyze(appDataRoot, 10, 5000,
-                new Cleanup.AnalysisContext(evidence, null));
-            var neteaseItem = inUse?.Items.FirstOrDefault(i => i.Name == "NetEase");
+            var neteaseVerdict = Cleanup.DirectoryAnalyzer.Classify("NetEase", true, @"C:\Users\selftest\AppData\Local",
+                new Cleanup.AnalysisContext(evidence, null), out var neteaseReason);
             Check("analyzer-detects-in-use-app",
-                neteaseItem is { Verdict: Cleanup.CleanVerdict.InUseApp },
-                "正在运行的网易云 -> " + (neteaseItem?.Verdict.ToString() ?? "null") +
-                (neteaseItem is null ? "" : " / " + neteaseItem.Reason));
+                neteaseVerdict == Cleanup.CleanVerdict.InUseApp && neteaseReason.Contains("cloudmusic"),
+                "正在运行的网易云 -> " + neteaseVerdict + " / " + neteaseReason);
         }
         finally
         {
@@ -843,9 +994,20 @@ internal static class SelfTest
 
             var deep = Cleanup.DirectoryAnalyzer.DeepScan(appLocal, 3, 40, 5000, null);
             var deepNames = deep.Select(d => d.Name).ToList();
-            Check("deepscan-finds-nested-caches",
-                deepNames.Contains("Cache") && deepNames.Contains("Code Cache") && !deepNames.Contains("Config") && deep.Count >= 2,
-                "深挖结果: " + string.Join(" / ", deepNames));
+            if (Cleanup.DirectoryAnalyzer.IsProtectedPath(deepRoot, out var deepProtectedReason))
+            {
+                // Probe lives in the user's Documents: the correct answer here is "offer nothing".
+                log.Info($"selftest SKIP deepscan-finds-nested-caches（探测根位于受保护路径：{deepProtectedReason}）");
+                Check("deepscan-finds-nested-caches",
+                    deep.Count == 0,
+                    "受保护目录下深挖不得给出可删项: " + (deepNames.Count == 0 ? "（空）" : string.Join(" / ", deepNames)));
+            }
+            else
+            {
+                Check("deepscan-finds-nested-caches",
+                    deepNames.Contains("Cache") && deepNames.Contains("Code Cache") && !deepNames.Contains("Config") && deep.Count >= 2,
+                    "深挖结果: " + string.Join(" / ", deepNames));
+            }
 
             var ignoreList = new Interaction.IgnoreList();
             ignoreList.Add(Path.Combine(appLocal, "Vendor"));
@@ -855,20 +1017,78 @@ internal static class SelfTest
                 ignored is not null && ignored.Items.All(i => i.Name != "Vendor"),
                 "忽略 Vendor 后条目数=" + (ignored?.Items.Count.ToString() ?? "null"));
 
-            var cleanerRoot = Path.Combine(Path.GetTempPath(), "whaledesk-cleaner-test");
-            Directory.CreateDirectory(cleanerRoot);
-            File.WriteAllBytes(Path.Combine(cleanerRoot, "keep.txt"), new byte[128]);
-            var notCache = new Cleanup.AnalysisItem("Documents", cleanerRoot, 128, Cleanup.CleanVerdict.SafeCache, "forced", false);
-            var notCacheDeleted = Cleanup.CacheCleaner.TryDelete(notCache, out _, out var notCacheReason);
-            var cacheDir = Path.Combine(cleanerRoot, "Cache");
-            Directory.CreateDirectory(cacheDir);
-            File.WriteAllBytes(Path.Combine(cacheDir, "junk.bin"), new byte[4096]);
-            var cacheItem = new Cleanup.AnalysisItem("Cache", cacheDir, 4096, Cleanup.CleanVerdict.SafeCache, "test", false);
-            var cacheDeleted = Cleanup.CacheCleaner.TryDelete(cacheItem, out var cacheFreed, out var cacheReason);
-            Check("cleaner-guards-and-deletes-cache",
-                !notCacheDeleted && cacheDeleted && !Directory.Exists(cacheDir) && cacheFreed >= 4096,
-                $"非缓存拒绝={!notCacheDeleted}({notCacheReason}) 缓存删除={cacheDeleted}({cacheReason}) freed={cacheFreed}");
-            try { Directory.Delete(cleanerRoot, true); } catch { }
+            var cleanerRoot = NewProbeDir("whaledesk-cleaner-test-" + Guid.NewGuid().ToString("N")[..8], probeRoots);
+            if (cleanerRoot is null)
+            {
+                Check("cleaner-guards-and-deletes-cache", false, "构建目录（工作区）不可写，建不出清理探针目录");
+            }
+            else
+            {
+                try
+                {
+                    File.WriteAllBytes(Path.Combine(cleanerRoot, "keep.txt"), new byte[128]);
+                    var notCache = new Cleanup.AnalysisItem("Documents", cleanerRoot, 128, Cleanup.CleanVerdict.SafeCache, "forced", false);
+                    var notCacheDeleted = Cleanup.CacheCleaner.TryDelete(notCache, out _, out var notCacheReason);
+                    var cacheDir = Path.Combine(cleanerRoot, "Cache");
+                    Directory.CreateDirectory(cacheDir);
+                    File.WriteAllBytes(Path.Combine(cacheDir, "junk.bin"), new byte[4096]);
+                    var cacheItem = new Cleanup.AnalysisItem("Cache", cacheDir, 4096, Cleanup.CleanVerdict.SafeCache, "test", false);
+                    // Rule 3 only lets %LOCALAPPDATA%/%APPDATA%/%TEMP% be deleted, and Low integrity can
+                    // write none of them. So: under an allowed root the target must really be deleted,
+                    // otherwise the expected behaviour is an explicit refusal.
+                    var deletableHere = Cleanup.CacheCleaner.IsAllowedRoot(cacheDir);
+                    var cacheDeleted = Cleanup.CacheCleaner.TryDelete(cacheItem, out var cacheFreed, out var cacheReason);
+                    if (!deletableHere)
+                        log.Info("selftest SKIP cleaner-deletes-cache（Low 完整性级别下没有可写的「允许清理根」，端到端删除未跑）");
+                    Check("cleaner-guards-and-deletes-cache",
+                        !notCacheDeleted &&
+                        (deletableHere ? cacheDeleted && !Directory.Exists(cacheDir) && cacheFreed >= 4096 : !cacheDeleted),
+                        $"非缓存拒绝={!notCacheDeleted}({notCacheReason}) 允许根={deletableHere} 缓存删除={cacheDeleted}({cacheReason}) freed={cacheFreed}");
+                }
+                catch (Exception ex)
+                {
+                    Check("cleaner-guards-and-deletes-cache", false, $"清理探针目录操作失败：{ex.GetType().Name} {ex.Message}");
+                }
+                finally
+                {
+                    try { Directory.Delete(cleanerRoot, true); } catch { }
+                }
+            }
+
+            // Safety rule 4 (the one the class comment promised but the code never had): a folder
+            // holding an executable entry point is an app folder, not a cache. The probe can only live
+            // in the workspace (Low IL), which IS a protected path, so 4a answers before 4c could ever
+            // run - therefore assert 4c itself here, and SKIP the end-to-end TryDelete refusal out loud.
+            var appLikeDir = NewProbeDir("whaledesk-cleaner-app-" + Guid.NewGuid().ToString("N")[..8], probeRoots);
+            if (appLikeDir is null)
+            {
+                Check("cleaner-detects-app-folder", false, "构建目录（工作区）不可写，建不出探针目录");
+            }
+            else
+            {
+                try
+                {
+                    var plainCache = Path.Combine(appLikeDir, "PlainCache");
+                    Directory.CreateDirectory(plainCache);
+                    File.WriteAllBytes(Path.Combine(plainCache, "data_0"), new byte[64]);
+                    File.WriteAllBytes(Path.Combine(appLikeDir, "WhaleDesk.exe"), new byte[64]);
+                    var withEntry = Cleanup.CacheCleaner.HasExecutableEntryPoint(appLikeDir, out var withEntryReason);
+                    var plainWithEntry = Cleanup.CacheCleaner.HasExecutableEntryPoint(plainCache, out _);
+                    var missingWithEntry = Cleanup.CacheCleaner.HasExecutableEntryPoint(Path.Combine(appLikeDir, "not-there"), out _);
+                    log.Info("selftest SKIP cleaner-refuses-app-folder（Low 完整性级别下没有可写的「允许清理根」，端到端拒绝未跑）");
+                    Check("cleaner-detects-app-folder",
+                        withEntry && !plainWithEntry && !missingWithEntry && !string.IsNullOrWhiteSpace(withEntryReason),
+                        $"有 exe -> {withEntry}({withEntryReason}) / 纯缓存 -> {plainWithEntry} / 不存在 -> {missingWithEntry}");
+                }
+                catch (Exception ex)
+                {
+                    Check("cleaner-detects-app-folder", false, $"探针目录操作失败：{ex.GetType().Name} {ex.Message}");
+                }
+                finally
+                {
+                    try { Directory.Delete(appLikeDir, true); } catch { }
+                }
+            }
         }
         finally
         {
@@ -939,33 +1159,43 @@ internal static class SelfTest
             try { Directory.Delete(pluginRoot, true); } catch { }
         }
         // ---------- clipboard image history ----------
-        var imgRoot = Path.Combine(Path.GetTempPath(), "whaledesk clip img " + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(imgRoot);
-        try
+        var imgRoot = NewProbeDir("whaledesk clip img " + Guid.NewGuid().ToString("N")[..8], probeRoots);
+        if (imgRoot is null)
         {
-            var imgStore = new Interaction.ClipboardHistoryStore { Capacity = 3, MaxImages = 2 };
-            var files = new List<string>();
-            for (var i = 0; i < 3; i++)
-            {
-                var file = Path.Combine(imgRoot, $"img{i}.png");
-                File.WriteAllBytes(file, new byte[] { 1, 2, 3, (byte)i });
-                files.Add(file);
-                imgStore.AddImage(file, 16, 16, DateTime.Now.AddSeconds(i));
-            }
-            var imageEntries = imgStore.Entries.Where(e => e.IsImage).ToList();
-            var previewOk = imageEntries.Any(e => e.Preview.Contains("图片"));
-            var prunedOk = !File.Exists(files[0]);
-            imgStore.Save(Path.Combine(imgRoot, "history.json"));
-            var imgReloaded = Interaction.ClipboardHistoryStore.Load(Path.Combine(imgRoot, "history.json"));
-            Check("clipboard-image-store",
-                imageEntries.Count == 2 && previewOk && prunedOk &&
-                imgReloaded.Entries.Count(e => e.IsImage) == 2 &&
-                imgReloaded.Entries.Any(e => e.IsImage && e.ImageWidth == 16),
-                $"保留={imageEntries.Count} 预览=「{imageEntries.FirstOrDefault()?.Preview}」 旧文件已删={prunedOk} 重载图片={imgReloaded.Entries.Count(e => e.IsImage)}");
+            Check("clipboard-image-store", false, "构建目录（工作区）不可写，建不出剪贴板图片探针目录");
         }
-        finally
+        else
         {
-            try { Directory.Delete(imgRoot, true); } catch { }
+            try
+            {
+                var imgStore = new Interaction.ClipboardHistoryStore { Capacity = 3, MaxImages = 2 };
+                var files = new List<string>();
+                for (var i = 0; i < 3; i++)
+                {
+                    var file = Path.Combine(imgRoot, $"img{i}.png");
+                    File.WriteAllBytes(file, new byte[] { 1, 2, 3, (byte)i });
+                    files.Add(file);
+                    imgStore.AddImage(file, 16, 16, DateTime.Now.AddSeconds(i));
+                }
+                var imageEntries = imgStore.Entries.Where(e => e.IsImage).ToList();
+                var previewOk = imageEntries.Any(e => e.Preview.Contains("图片"));
+                var prunedOk = !File.Exists(files[0]);
+                imgStore.Save(Path.Combine(imgRoot, "history.json"));
+                var imgReloaded = Interaction.ClipboardHistoryStore.Load(Path.Combine(imgRoot, "history.json"));
+                Check("clipboard-image-store",
+                    imageEntries.Count == 2 && previewOk && prunedOk &&
+                    imgReloaded.Entries.Count(e => e.IsImage) == 2 &&
+                    imgReloaded.Entries.Any(e => e.IsImage && e.ImageWidth == 16),
+                    $"保留={imageEntries.Count} 预览=「{imageEntries.FirstOrDefault()?.Preview}」 旧文件已删={prunedOk} 重载图片={imgReloaded.Entries.Count(e => e.IsImage)}");
+            }
+            catch (Exception ex)
+            {
+                Check("clipboard-image-store", false, $"剪贴板图片探针操作失败：{ex.GetType().Name} {ex.Message}");
+            }
+            finally
+            {
+                try { Directory.Delete(imgRoot, true); } catch { }
+            }
         }
         // ---------- auto update: version comparison ----------
         Check("update-version-compare",

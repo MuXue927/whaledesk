@@ -72,7 +72,11 @@ internal sealed class ClipboardHistoryStore
         {
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, JsonSerializer.Serialize(Entries, Json));
+            // 原子写（同 KeepList/IgnoreList）：常驻进程被强杀时别留下半截 JSON，
+            // 否则下一次 Load 会把剪贴板历史整份丢掉。
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(Entries, Json));
+            File.Move(tmp, path, overwrite: true);
         }
         catch { /* read-only state folder: keep working in memory */ }
     }

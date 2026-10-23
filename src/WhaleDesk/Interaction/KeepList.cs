@@ -39,7 +39,11 @@ internal sealed class KeepList
         {
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, JsonSerializer.Serialize(Entries, Json));
+            // 原子写：进程被杀或断电时不能留下半截 JSON，否则 Load 的 catch 把半截文件当成空集合，
+            // 用户的保留清单一次性归零。UiState 早就用 .tmp + Move 了，这里照做。
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(Entries, Json));
+            File.Move(tmp, path, overwrite: true);
         }
         catch
         {

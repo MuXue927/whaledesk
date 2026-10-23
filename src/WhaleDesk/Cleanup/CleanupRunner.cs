@@ -196,12 +196,9 @@ internal static class CleanupRunner
             foreach (var a in args) psi.ArgumentList.Add(a);
             using var proc = Process.Start(psi);
             if (proc is null) return new CleanupResult(targetId, 0, 0, 0, "无法启动命令", null);
-            var output = proc.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd();
-            if (!proc.WaitForExit(timeoutMs))
-            {
-                try { proc.Kill(true); } catch { }
-                return new CleanupResult(targetId, 0, 0, 0, "命令超时", Tail(output));
-            }
+            var output = ReadBothAndWait(proc, timeoutMs, out var timedOut);
+            if (timedOut)
+                return new CleanupResult(targetId, 0, 0, 0, $"命令超时（{timeoutMs / 1000} 秒），已结束整个进程树", Tail(output));
             log.Info($"command {file} exited {proc.ExitCode}");
             return new CleanupResult(targetId, 0, 0, 0, proc.ExitCode == 0 ? null : $"命令退出码 {proc.ExitCode}", Tail(output));
         }
@@ -209,6 +206,36 @@ internal static class CleanupRunner
         {
             return new CleanupResult(targetId, 0, 0, 0, ex.Message, null);
         }
+    }
+
+    /// <summary>
+    /// Read stdout and stderr CONCURRENTLY, then wait for the exit with a real timeout.
+    ///
+    /// The old code did <c>StandardOutput.ReadToEnd() + StandardError.ReadToEnd()</c> before
+    /// <c>WaitForExit(timeoutMs)</c>: ReadToEnd blocks until EOF, nobody drains stderr meanwhile,
+    /// and a child that fills the 4 KB stderr pipe (npm WARN/ERR, DISM progress) never exits and
+    /// never closes stdout - so the timeout was dead code and the UI thread hung forever.
+    ///
+    /// Returns everything that was read (logs/UI still get their output); <paramref name="timedOut"/>
+    /// says whether the timeout fired (the whole process tree is killed in that case).
+    /// </summary>
+    private static string ReadBothAndWait(Process proc, int timeoutMs, out bool timedOut)
+    {
+        var stdout = proc.StandardOutput.ReadToEndAsync();
+        var stderr = proc.StandardError.ReadToEndAsync();
+
+        timedOut = !proc.WaitForExit(timeoutMs);
+        if (timedOut)
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+        }
+
+        // The process has exited (or was just killed), so both readers should finish at once.
+        // A bounded wait keeps a wedged pipe from hanging the caller again.
+        try { Task.WaitAll(new Task[] { stdout, stderr }, 10_000); } catch { }
+
+        return (stdout.Status == TaskStatus.RanToCompletion ? stdout.Result : string.Empty)
+             + (stderr.Status == TaskStatus.RanToCompletion ? stderr.Result : string.Empty);
     }
 
     private static string Tail(string text) => text.Length > 600 ? text[^600..] : text;
@@ -230,7 +257,7 @@ internal static class CleanupRunner
             var ok = hardDelete
                 ? HardDelete(new[] { target.Path }, log, out _)
                 : RecycleBin.TryRecycle(new[] { target.Path }, log, out _);
-            return new CleanupResult(target.Id, size, ok ? 1 : 0, ok ? 0 : 1, ok ? null : "文件无法删除（可能被占用）", null);
+            return new CleanupResult(target.Id, ok ? size : 0, ok ? 1 : 0, ok ? 0 : 1, ok ? null : "文件无法删除（可能被占用）", null);
         }
 
         var scan = CleanupScanner.Scan(target, log);
@@ -245,13 +272,20 @@ internal static class CleanupRunner
             var files = Directory.Exists(target.Path)
                 ? Directory.EnumerateFiles(target.Path, target.Pattern ?? "*", SearchOption.TopDirectoryOnly).ToList()
                 : new List<string>();
+            var fileSizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             foreach (var file in files)
             {
-                try { bytes += new FileInfo(file).Length; } catch { }
+                long size = 0;
+                try { size = new FileInfo(file).Length; } catch { }
+                fileSizes[file] = size;
             }
             var ok = hardDelete ? HardDelete(files, log, out var failed) : RecycleBin.TryRecycle(files, log, out failed);
             deleted = files.Count - failed;
             skipped += failed;
+            foreach (var file in files)
+            {
+                if (!RecycleBin.StillThere(file)) bytes += fileSizes[file];   // 只算真的没了的
+            }
             if (!ok && failed == files.Count) return new CleanupResult(target.Id, 0, 0, files.Count, "回收站调用失败", null);
             return new CleanupResult(target.Id, bytes, deleted, skipped, null, null);
         }
@@ -264,9 +298,11 @@ internal static class CleanupRunner
             var walk = CleanupScanner.Walk(target.Path, target.MinAgeDays, log);
             foreach (var file in walk.Files)
             {
-                try { bytes += file.Length; } catch { }
+                var size = 0L;
+                try { size = file.Length; } catch { }
                 var one = new[] { file.FullName };
-                if (hardDelete ? HardDelete(one, log, out _) : RecycleBin.TryRecycle(one, log, out _)) deleted++;
+                // 只把"确认没了"的量算进释放空间：被跳过的文件还在盘上，不叫释放。
+                if (hardDelete ? HardDelete(one, log, out _) : RecycleBin.TryRecycle(one, log, out _)) { deleted++; bytes += size; }
                 else skipped++;
                 if (++guard % 200 == 0) log.Info($"cleanup {target.Id}: {guard} files processed");
             }
@@ -290,29 +326,30 @@ internal static class CleanupRunner
                 return new CleanupResult(target.Id, 0, deleted, skipped, "无法枚举: " + ex.Message, null);
             }
 
+            // 先量好每一项的体积，"释放了多少"只累加删完之后确实不在的那些 —— 原来量的是
+            // "尝试删除的量"，被占用的文件也算了进去，界面上那个数字是虚的。
+            var sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entries)
             {
-                try
-                {
-                    if (File.Exists(entry)) bytes += new FileInfo(entry).Length;
-                    else bytes += DirSize(entry);
-                }
-                catch { }
+                long size = 0;
+                try { size = File.Exists(entry) ? new FileInfo(entry).Length : DirSize(entry); } catch { }
+                sizes[entry] = size;
             }
 
             const int batch = 120;
             for (var i = 0; i < entries.Count; i += batch)
             {
                 var slice = entries.Skip(i).Take(batch).ToList();
-                if (hardDelete ? HardDelete(slice, log, out var failed) : RecycleBin.TryRecycle(slice, log, out failed))
+                int failed;
+                var ok = hardDelete ? HardDelete(slice, log, out failed) : RecycleBin.TryRecycle(slice, log, out failed);
+                deleted += slice.Count - failed;
+                skipped += failed;
+                foreach (var entry in slice)
                 {
-                    deleted += slice.Count - failed;
-                    skipped += failed;
+                    if (RecycleBin.StillThere(entry)) continue;   // 还在：不算释放
+                    bytes += sizes.TryGetValue(entry, out var size) ? size : 0;
                 }
-                else
-                {
-                    skipped += slice.Count;
-                }
+                if (!ok && failed == slice.Count) log.Warn($"cleanup {target.Id}: the shell refused the whole batch of {slice.Count}");
             }
         }
 
@@ -366,16 +403,25 @@ internal static class CleanupRunner
             foreach (var a in args) psi.ArgumentList.Add(a);
             using var proc = Process.Start(psi);
             if (proc is null) return new CleanupResult(target.Id, 0, 0, 0, "无法启动命令", null);
-            var output = proc.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd();
-            if (!proc.WaitForExit(120_000)) { try { proc.Kill(true); } catch { } return new CleanupResult(target.Id, 0, 0, 0, "命令超时", output); }
-            var tail = output.Length > 400 ? output[^400..] : output;
+            // Concurrent stdout/stderr reads: npm writes its warnings/errors to stderr, and the
+            // old sequential ReadToEnd deadlocked long before the timeout could fire.
+            var output = ReadBothAndWait(proc, 120_000, out var timedOut);
+            if (timedOut)
+                return new CleanupResult(target.Id, 0, 0, 0, "命令超时（120 秒），已结束整个进程树", Flatten(output));
             log.Info($"cleanup {target.Id}: {file} {string.Join(" ", args)} exited {proc.ExitCode}");
-            return new CleanupResult(target.Id, 0, 0, 0, proc.ExitCode == 0 ? null : $"命令退出码 {proc.ExitCode}", tail.Replace("\r", " ").Replace("\n", " "));
+            return new CleanupResult(target.Id, 0, 0, 0, proc.ExitCode == 0 ? null : $"命令退出码 {proc.ExitCode}", Flatten(output));
         }
         catch (Exception ex)
         {
             return new CleanupResult(target.Id, 0, 0, 0, ex.Message, null);
         }
+    }
+
+    /// <summary>Last 400 chars, newlines collapsed: the cleanup detail column is one line.</summary>
+    private static string Flatten(string output)
+    {
+        var tail = output.Length > 400 ? output[^400..] : output;
+        return tail.Replace("\r", " ").Replace("\n", " ");
     }
 
     /// <summary>
@@ -633,19 +679,53 @@ internal static class RecycleBin
         try
         {
             var rc = SHFileOperation(ref op);
-            if (rc != 0 || op.fAnyOperationsAborted)
-            {
-                failed = list.Count;
-                log.Warn($"recycle: shell returned {rc} aborted={op.fAnyOperationsAborted} for {list.Count} item(s)");
-                return false;
-            }
-            return true;
+            var aborted = op.fAnyOperationsAborted;
+
+            // 口径：不问 Shell"成不成"，只问"东西还在不在"。返回非 0 / aborted 时，失败往往只是
+            // 某一个被占用的文件，按整批算失败会把界面数字吹成 0；返回 0 时也不代表每项都真进了
+            // 回收站（组策略关掉回收站、单项超配额时 Shell 会直接永久删除并照样返回成功）。
+            failed = list.Count(StillThere);
+            var gone = list.Count - failed;
+            if (failed > 0)
+                log.Warn($"recycle: {gone}/{list.Count} gone (shell rc={rc} aborted={aborted})");
+            return failed == 0;
         }
         catch (Exception ex)
         {
             failed = list.Count;
             log.Warn("recycle failed: " + ex.Message);
             return false;
+        }
+    }
+
+    internal static bool StillThere(string path)
+    {
+        try { return Directory.Exists(path) || File.Exists(path); }
+        catch { return true; }
+    }
+
+    /// <summary>
+    /// 回收站能不能真的把东西留下来让你还原：组策略把 NukeOnDelete 置 1 时，Shell 会直接永久
+    /// 删除却仍然返回成功。这时界面上再写"可还原"就是骗人，所以删之前先问一句。
+    /// </summary>
+    public static bool CanUndelete()
+    {
+        try
+        {
+            foreach (var (hive, sub) in new (Microsoft.Win32.RegistryKey, string)[]
+                     {
+                         (Microsoft.Win32.Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket"),
+                         (Microsoft.Win32.Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\BitBucket"),
+                     })
+            {
+                using var key = hive.OpenSubKey(sub);
+                if (key?.GetValue("NukeOnDelete") is int nuke && nuke == 1) return false;
+            }
+            return true;
+        }
+        catch
+        {
+            return true;   // 读不到策略就别吓唬用户
         }
     }
 }

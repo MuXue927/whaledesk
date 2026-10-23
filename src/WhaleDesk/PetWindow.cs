@@ -56,7 +56,6 @@ internal sealed partial class PetWindow : Window
     private bool _polling;
     private bool _hotkeyRegistered;
     private string _hotkeyName = "(none)";
-    private string _lastBubble = "";
     private string _stateSummary = "not-polled-yet";
     private bool _dragging;
     private bool _dragMoved;
@@ -75,6 +74,8 @@ internal sealed partial class PetWindow : Window
     private bool _cleanupOpen;
     private double _cleanupHeight;
     private bool _cleanupScanning;
+    private bool _cleanupBatchRunning;                  // 闸门：扫描有守卫，清理原来没有
+    private CancellationTokenSource? _cleanupBatchCts;  // 运行中可取消（只在目标之间检查）
     private readonly double _baseHeight;
     // window height in DIP with no card open
     private double _extraHeight;
@@ -97,7 +98,7 @@ internal sealed partial class PetWindow : Window
         _dshBase = opts.DshBase ?? _ui.DshBaseUrl ?? PetStateClient.DefaultBase;
         _state = new PetStateClient(_dshBase);
         log.Info($"state poller base = {_state.BaseUrl}");
-        if (opts.DshBase is null) _ = DiscoverDshEndpointAsync(initial: true);
+        if (opts.DshBase is null && !opts.NoDiscovery) _ = DiscoverDshEndpointAsync(initial: true);
         log.Info($"state poller base = {_state.BaseUrl}");
         // ---- P5 restore ----
         _lowMemory.Enabled = _ui.LowMemoryMode;
@@ -268,7 +269,11 @@ internal sealed partial class PetWindow : Window
         // ---- self-recovery: DSH offline -> slower polling, and say it once ----
         if (_state.ConsecutiveFailures >= 3)
         {
-            _stateTimer.Interval = TimeSpan.FromMilliseconds(5000);
+            // v0.24.4 backed off to 5s here, and the request timeout alone is 1.5s: after quitting
+            // DSH the pet needed up to ~6s to notice it was back. A refused loopback connection
+            // returns in a millisecond, and _polling already keeps in-flight requests from piling
+            // up, so the offline cadence can stay tight.
+            _stateTimer.Interval = TimeSpan.FromMilliseconds(1500);
         }
         else if (_stateTimer.Interval != TimeSpan.FromMilliseconds(800))
         {
@@ -841,6 +846,22 @@ internal sealed partial class PetWindow : Window
             {
                 _stateSummary = $"offline (failures={_state.ConsecutiveFailures} last={_state.LastError})";
                 _taskWatch.Observe(null, Environment.TickCount64);
+                // DSH takes a NEW port on every launch, so a stale base URL fails for ever. The
+                // discovery probe was written for exactly this (it self-throttles to one run per
+                // 10s) but nothing called it after startup: quitting DSH left the pet pinned to a
+                // dead port until the next relaunch. That was the "state never catches up" bug.
+                if (_state.ConsecutiveFailures >= 2 && !_opts.NoDiscovery) _ = DiscoverDshEndpointAsync();
+                if (_state.ConsecutiveFailures >= 3)
+                {
+                    // Nothing on screen may keep claiming a live DSH: drop the line the server
+                    // left behind (a petting/pomodoro line is left alone until its hold expires).
+                    _dshSessionActive = false;
+                    if (Environment.TickCount64 >= _localBubbleUntilMs && !string.IsNullOrEmpty(_visual.BubbleText))
+                    {
+                        _visual.SetBubble(null);
+                        _log.Info("bubble cleared: DSH is offline");
+                    }
+                }
                 if (_healthWatch.Record(true, Environment.TickCount64))
                 {
                     _log.Warn($"DSH link is flaky: {_healthWatch.RecentFailures(Environment.TickCount64)} failures in the window");
@@ -861,9 +882,14 @@ internal sealed partial class PetWindow : Window
                 _visual.SetFrame(_player.Track.Row, _player.FrameColumn);
                 _log.Info($"track -> {state.Animation} (phase={state.Phase})");
             }
-            if (Environment.TickCount64 >= _localBubbleUntilMs &&                !string.Equals(state.Bubble, _lastBubble, StringComparison.Ordinal))
+            // Compare against what is actually on screen, not against the last state we received.
+            // A local line (petting, pomodoro, idle chatter, presence hints) overwrites the bubble
+            // without touching any "last state" variable, so the old comparison (state.Bubble vs
+            // _lastBubble) kept showing the local line for ever whenever DSH's own text had not
+            // changed since the previous poll. "W" is removed with this fix.
+            if (Environment.TickCount64 >= _localBubbleUntilMs &&
+                !string.Equals(state.Bubble ?? "", _visual.BubbleText ?? "", StringComparison.Ordinal))
             {
-                _lastBubble = state.Bubble ?? "";
                 _visual.SetBubble(state.Bubble);
             }
         }
@@ -1040,6 +1066,12 @@ internal sealed partial class PetWindow : Window
         _localBubbleUntilMs = Environment.TickCount64 + holdMs;
         _visual.SetBubble(text);
     }
+
+    /// <summary>
+    /// 对外的一句话提示（App 的 UI 异常守门人用）。走本地气泡通道，不碰托盘状态：
+    /// 托盘那行是 DSH 的在线状态，被覆盖会误导用户。
+    /// </summary>
+    public void ShowNotice(string text, int holdMs = 4000) => ShowLocalBubble(text, holdMs, force: true);
     // ---------------------------------------------------------------- menu
     private void ToggleMenu()
     {
@@ -1162,6 +1194,9 @@ internal sealed partial class PetWindow : Window
             // kept the window in "card open" mode forever.
             _menuWindow.Closed += (_, _) =>
             {
+                // Null the field even when the flags below already say "closed": a stale reference
+                // to a closed window made later Close() calls silent no-ops.
+                _menuWindow = null;
                 if (!_menuOpen) return;
                 _menuOpen = false;
                 _menuHeight = 0;
@@ -1169,6 +1204,10 @@ internal sealed partial class PetWindow : Window
                 EnforcePetVisible("menu-closed");
             };
             _menuWindow.Show();
+            // Mark the menu open BEFORE placing it: Place() can throw (monitor unplugged, work
+            // area nonsense), and the old order left a visible menu on screen while our own state
+            // said "closed", so nothing could ever close it.
+            _menuOpen = true;
             _menuWindow.Place();
             _log.Info("menu window placed: " + _menuWindow.PlaceDiagnostics);
             _log.Info($"menu monitor={_monitor.Device} scale={_monitor.Scale:0.##}");
@@ -1178,10 +1217,15 @@ internal sealed partial class PetWindow : Window
         catch (Exception ex)
         {
             _log.Warn("menu window failed: " + ex.Message);
+            // A half-opened menu must not outlive the failure: close it and reset every flag so
+            // the next right-click starts from a clean state.
+            try { _menuWindow?.Close(); } catch { }
+            _menuWindow = null;
+            _menuOpen = false;
+            _menuHeight = 0;
             ShowLocalBubble("菜单打不开：" + ex.Message, 4000, force: true);
             return;
         }
-        _menuOpen = true;
         _menuHeight = 0;
 
         _log.Info($"menu opened as window: sections={sections.Count} items={visibleItems}");
@@ -1757,6 +1801,12 @@ internal sealed partial class PetWindow : Window
         try
         {
             _launchers ??= Interaction.LauncherStore.Load(LauncherConfigPath);
+            // 手改 JSON 出错时不再静默变回默认值：告诉用户备份在哪，原文件没被动过。
+            if (Interaction.LauncherStore.LastRecoveryBackup is { } brokenLauncherConfig)
+            {
+                _log.Warn($"launcher config unreadable, kept a copy: {brokenLauncherConfig}");
+                ShowLocalBubble($"快捷启动配置读不懂（多半是手改少了个逗号），已另存备份：{Path.GetFileName(brokenLauncherConfig)}", 8000, force: true);
+            }
             if (_launcherWindow is { IsVisible: true })
             {
                 _launcherWindow.Activate();
@@ -2161,7 +2211,8 @@ internal sealed partial class PetWindow : Window
             _log.Info($"clean caches: deleted={result.Deleted} refused={result.Refused} freed={result.FreedBytes}");
             foreach (var message in result.Messages.Take(5)) _log.Warn("clean refused: " + message);
             var note = result.Refused > 0 ? $"，{result.Refused} 项被拒绝（见日志）" : "";
-            ShowLocalBubble($"已清理 {result.Deleted} 项{note}，释放约 {Fmt.Bytes(result.FreedBytes)}（回收站可还原）", 6000, force: true);
+            var undo = Cleanup.RecycleBin.CanUndelete() ? "（回收站可还原）" : "（永久删除，无法还原）";
+            ShowLocalBubble($"已清理 {result.Deleted} 项{note}，释放约 {Fmt.Bytes(result.FreedBytes)}{undo}", 6000, force: true);
             _analysisWindow?.Close();
             _bigDirsScannedAtMs = 0;
             _ = ScanBigDirectoriesAsync();
@@ -2350,7 +2401,15 @@ internal sealed partial class PetWindow : Window
     private void CloseCardsExcept(string keep)
     {
         if (keep != "panel" && _panelOpen) { _visual.Panel.Visibility = Visibility.Collapsed; _panelOpen = false; _panelHeight = 0; }
-        if (keep != "cleanup" && _cleanupOpen) { _visual.Cleanup.Visibility = Visibility.Collapsed; _cleanupOpen = false; _cleanupHeight = 0; }
+        if (keep != "cleanup" && _cleanupOpen)
+        {
+            // Closing the card is the user's way of saying "stop": let a running batch end after
+            // the target it is on instead of deleting into a hidden card for minutes.
+            CancelCleanupBatch("cleanup card closed");
+            _visual.Cleanup.Visibility = Visibility.Collapsed;
+            _cleanupOpen = false;
+            _cleanupHeight = 0;
+        }
     }
     private bool AnyCardOpen => _menuOpen || _panelOpen || _cleanupOpen;
     /// <summary>Measure every whitelisted target on a worker thread; nothing is modified.</summary>
@@ -2393,6 +2452,16 @@ internal sealed partial class PetWindow : Window
     /// </summary>
     private async Task RunSafeBatchAsync()
     {
+        // Gate: v0.24.4 had none here (the scan did), so a second click while a batch was running
+        // started a second pass over the SAME targets - two shell deletes on one folder at once -
+        // and the progress line was overwritten by whichever pass wrote last.
+        if (_cleanupBatchRunning)
+        {
+            _log.Warn("cleanup safe-batch ignored: a batch is already running");
+            _visual.Cleanup.SetBusy("上一轮清理还没结束，稍等一下…");
+            return;
+        }
+
         var batch = CleanupCatalog.SafeBatch(_cleanupTempAgeDays);
         var present = batch.Where(t =>
         {
@@ -2404,23 +2473,77 @@ internal sealed partial class PetWindow : Window
         {
             _visual.Cleanup.SetBusy("放心项里没有发现可清理的内容。");
             return;
-        }        long bytes = 0;
+        }
+
+        _cleanupBatchRunning = true;
+        _cleanupBatchCts = new CancellationTokenSource();
+        var ct = _cleanupBatchCts.Token;
+        long bytes = 0;
         var deleted = 0;
         var skipped = 0;
         var failed = 0;
-        for (var i = 0; i < present.Count; i++)
+        var cancelled = false;
+        try
         {
-            var target = present[i];
-            _visual.Cleanup.SetBusy($"正在清理放心项 {i + 1}/{present.Count}：{target.Label}…");
-            var result = await Task.Run(() => CleanupRunner.Clean(target, _log)).ConfigureAwait(true);            bytes += result.Bytes;            deleted += result.Deleted;            skipped += result.Skipped;
-            if (result.Error is not null) failed++;
-            _log.Info($"safe-batch [{i + 1}/{present.Count}] {target.Id}: bytes={result.Bytes} deleted={result.Deleted} skipped={result.Skipped} error={result.Error ?? "none"}");
-            await Task.Delay(150).ConfigureAwait(true);
+            for (var i = 0; i < present.Count; i++)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    cancelled = true;
+                    break;
+                }
+                var target = present[i];
+                _visual.Cleanup.SetBusy($"正在清理放心项 {i + 1}/{present.Count}：{target.Label}…");
+                var result = await Task.Run(() => CleanupRunner.Clean(target, _log), ct).ConfigureAwait(true);
+                bytes += result.Bytes;
+                deleted += result.Deleted;
+                skipped += result.Skipped;
+                if (result.Error is not null) failed++;
+                _log.Info($"safe-batch [{i + 1}/{present.Count}] {target.Id}: bytes={result.Bytes} deleted={result.Deleted} skipped={result.Skipped} error={result.Error ?? "none"}");
+                await Task.Delay(150, ct).ConfigureAwait(true);
+            }
         }
-        _log.Info($"cleanup safe-batch done: bytes={bytes} deleted={deleted} skipped={skipped} failedTargets={failed}");
-        ShowLocalBubble($"放心项清理完成，回收 {Fmt.Bytes((ulong)Math.Max(0, bytes))}", 4000, force: true);
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+        catch (Exception ex)
+        {
+            // v0.24.4 had no catch at all and the event handler discarded the Task (`_ = ...`),
+            // so a single exception left the card stuck on "正在清理放心项 i/N…" for ever.
+            _log.Error("cleanup safe-batch failed: " + ex);
+            _visual.Cleanup.SetBusy("清理出错（已经停下）：" + ex.Message);
+            return;
+        }
+        finally
+        {
+            _cleanupBatchRunning = false;
+            _cleanupBatchCts?.Dispose();
+            _cleanupBatchCts = null;
+        }
+
+        _log.Info($"cleanup safe-batch done: bytes={bytes} deleted={deleted} skipped={skipped} failedTargets={failed} cancelled={cancelled}");
+        if (cancelled)
+            ShowLocalBubble($"清理已停下，已经回收 {Fmt.Bytes((ulong)Math.Max(0, bytes))}", 3500, force: true);
+        else
+            ShowLocalBubble($"放心项清理完成，回收 {Fmt.Bytes((ulong)Math.Max(0, bytes))}", 4000, force: true);
         await ScanCleanupAsync();
-        _visual.Cleanup.SetBusy($"放心项完成：回收 {Fmt.Bytes((ulong)Math.Max(0, bytes))}，{deleted} 项已进回收站"                                + (skipped > 0 ? $"，{skipped} 项占用中被跳过" : "")                                + (failed > 0 ? $"，{failed} 项失败" : ""));
+        _visual.Cleanup.SetBusy($"放心项完成：回收 {Fmt.Bytes((ulong)Math.Max(0, bytes))}，{deleted} 项已进回收站"
+                                + (skipped > 0 ? $"，{skipped} 项占用中被跳过" : "")
+                                + (failed > 0 ? $"，{failed} 项失败" : "")
+                                + (cancelled ? "（中途取消）" : ""));
+    }
+
+    /// <summary>
+    /// Stop a running safe-batch between targets. Cancellation never interrupts a shell delete
+    /// half way: the token is only checked before each target, so no folder is left half deleted.
+    /// </summary>
+    private void CancelCleanupBatch(string reason)
+    {
+        var cts = _cleanupBatchCts;
+        if (cts is null || cts.IsCancellationRequested) return;
+        _log.Warn($"cleanup safe-batch cancel requested ({reason})");
+        cts.Cancel();
     }
     /// <summary>
     /// The "定期" half of the big cleanup: every N days (default 14) a read-only scan
@@ -2450,6 +2573,14 @@ internal sealed partial class PetWindow : Window
     private async Task CleanTargetAsync(CleanupTarget target)
     {
         _log.Info($"cleanup execute requested: {target.Id} ({target.Label}, tier={target.Tier}, method={target.Method})");
+        // A row click during a batch would run a second delete on a folder the batch is already
+        // working on; refuse instead of racing.
+        if (_cleanupBatchRunning)
+        {
+            _log.Warn("cleanup single target ignored: a safe-batch is running");
+            _visual.Cleanup.SetBusy("正在清理放心项，等这一轮结束再点这一行吧…");
+            return;
+        }
         if (!CleanupCatalog.MayExecute(target))
         {
             _visual.Cleanup.SetResult(new CleanupResult(target.Id, 0, 0, 0, "该目标只报告、不执行", null));
@@ -2736,7 +2867,13 @@ internal sealed partial class PetWindow : Window
     private void ToggleVisible()
     {
         if (IsVisible)
-        {            Hide();
+        {
+            // The menu is a separate top-level window (no Owner), so hiding the pet left it
+            // floating on screen with _menuOpen still true. AnyCardOpen then stayed true for
+            // ever, permanently disabling click-through and follow-cursor until the user happened
+            // to click outside the orphaned menu.
+            if (_menuOpen) CloseMenu();
+            Hide();
             Persist();
             _tray?.SetVisibleState(false);
             _tray?.ShowHiddenHint();
@@ -2771,6 +2908,8 @@ internal sealed partial class PetWindow : Window
     /// <summary>Write the closing diagnostics, then close.</summary>
     public void FinishAndClose()
     {
+        // Never leave a worker thread deleting files after the window is gone.
+        CancelCleanupBatch("shutting down");
         Diagnostics = new[]
         {            $"rect={Rect()}",            $"monitor={_monitor.Device} anchor={_ui.Anchor ?? "none"}",            $"exstyle={Win32.Describe(Win32.GetExStyle(_hwnd))}",            $"clickThrough={_clickThrough}",            $"track={_player.TrackName} frame={_player.FrameIndex}",            $"state={_stateSummary}",            $"bubble={_visual.BubbleText}",            $"paused={_paused} hotkey={_hotkeyRegistered}",            $"foreground=0x{Win32.GetForegroundWindow():X}",
         };

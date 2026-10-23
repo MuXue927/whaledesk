@@ -68,6 +68,9 @@ internal static class DirectoryAnalyzer
         "_cacache", "npm-cache", "yarn-cache", "pnpm-store", "packages", "obj", "bin",
         ".vs", ".gradle", ".m2", ".nuget", "cargo", "go-build", "zig-cache", "electron",
         "pending", "updater", "update-cache", "webcache", "blob_storage", "blocklist",
+        // 中文名也算缓存（界面是中文的，用户自己建的目录常叫「缓存」）。
+        // 名字只是线索，最终还要过下面的路径级拦截。
+        "缓存",
     };
 
     private static readonly string[] CacheExtensions = { ".tmp", ".temp", ".log", ".dmp", ".etl", ".bak", ".old", ".crdownload", ".part" };
@@ -88,6 +91,174 @@ internal static class DirectoryAnalyzer
 
     /// <summary>Installed programs live here (or are a direct child of Program Files).</summary>
     private static readonly string[] InstalledParents = { "program files", "program files (x86)", "programdata" };
+
+    /// <summary>
+    /// A path that must never be judged deletable: the root itself, or (when
+    /// <see cref="Children"/> is set) everything underneath it.
+    ///
+    /// Why this exists: a name can only say "looks like a cache". Only the path says WHOSE
+    /// folder it is. Without this layer, %LOCALAPPDATA%\Packages (all UWP/store app data),
+    /// %LOCALAPPDATA%\Programs\Microsoft VS Code\bin and %APPDATA%\Microsoft\Windows\Templates
+    /// all matched the name list and were offered up as "safe to delete".
+    /// </summary>
+    private sealed record ProtectedPath(string Root, bool Children, CleanVerdict Verdict, string Reason);
+
+    private static readonly Lazy<IReadOnlyList<ProtectedPath>> ProtectedPaths = new(BuildProtectedPaths);
+
+    /// <summary>Roots that are protected outright; compared as normalized full paths, never by name.</summary>
+    private static IReadOnlyList<ProtectedPath> BuildProtectedPaths()
+    {
+        var list = new List<ProtectedPath>();
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+
+        void Add(string? path, bool children, CleanVerdict verdict, string reason)
+        {
+            var root = NormalizePath(path);
+            if (root.Length > 0) list.Add(new ProtectedPath(root, children, verdict, reason));
+        }
+
+        // The data roots themselves. Only the root is protected here: caches INSIDE them
+        // (%LOCALAPPDATA%\Temp\..., %LOCALAPPDATA%\Vendor\Cache\...) are still real caches.
+        Add(profile, false, CleanVerdict.PersonalFiles, "用户主目录本身：里面全是你的数据，不能整个删");
+        Add(localAppData, false, CleanVerdict.CleanInApp, "整个 AppData\\Local 不能当缓存清：里面是各应用的配置与数据");
+        Add(roaming, false, CleanVerdict.CleanInApp, "整个 AppData\\Roaming 不能当缓存清：里面是各应用的配置与数据");
+        Add(programData, false, CleanVerdict.CleanInApp, "整个 ProgramData 不能当缓存清：里面是各应用的配置与数据");
+
+        // Their interior is protected too: these are application data/program trees, not caches.
+        if (localAppData.Length > 0)
+        {
+            Add(Path.Combine(localAppData, "Packages"), true, CleanVerdict.CleanInApp,
+                "商店/UWP 应用的数据总目录：删了这些应用的数据和设置就没了");
+            Add(Path.Combine(localAppData, "Microsoft"), true, CleanVerdict.CleanInApp,
+                "微软组件目录（输入法、Edge、商店组件等）：属于应用数据，不能当缓存清");
+            Add(Path.Combine(localAppData, "Programs"), true, CleanVerdict.CleanInApp,
+                "已安装的程序目录（VS Code 等就装在这里）：请到「设置 → 应用」卸载");
+        }
+        if (roaming.Length > 0)
+        {
+            Add(Path.Combine(roaming, "Microsoft"), true, CleanVerdict.CleanInApp,
+                "%APPDATA%\\Microsoft：微软组件的漫游数据（含 Templates 等），不是缓存");
+        }
+
+        // The user's own content: show the size, never offer to delete.
+        var personal = new List<string?>();
+        foreach (var special in new[]
+                 {
+                     Environment.SpecialFolder.MyDocuments, Environment.SpecialFolder.DesktopDirectory,
+                     Environment.SpecialFolder.MyPictures, Environment.SpecialFolder.MyVideos,
+                     Environment.SpecialFolder.MyMusic,
+                 })
+        {
+            personal.Add(Environment.GetFolderPath(special));
+        }
+        foreach (var name in new[] { "Documents", "Desktop", "Pictures", "Videos", "Music", "Downloads", "OneDrive" })
+        {
+            personal.Add(profile.Length > 0 ? Path.Combine(profile, name) : null);
+        }
+        foreach (var folder in personal)
+        {
+            Add(folder, true, CleanVerdict.PersonalFiles, "你的个人文件目录：我不会建议删除");
+        }
+
+        Add(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), true, CleanVerdict.CleanInApp,
+            "已安装的程序目录：请到「设置 → 应用」卸载，手动删会留注册表垃圾");
+        Add(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), true, CleanVerdict.CleanInApp,
+            "已安装的程序目录（32 位）：请到「设置 → 应用」卸载，手动删会留注册表垃圾");
+        Add(Environment.GetFolderPath(Environment.SpecialFolder.Windows), true, CleanVerdict.SystemFiles,
+            "Windows 系统目录，不能手动删");
+
+        // Drive roots: "D:\" is nobody's cache.
+        Add(Path.GetPathRoot(profile), false, CleanVerdict.SystemFiles, "磁盘根目录，不能当缓存清");
+        try
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+                Add(drive.RootDirectory.FullName, false, CleanVerdict.SystemFiles, "磁盘根目录，不能当缓存清");
+        }
+        catch
+        {
+            // no drive list: the profile root above is enough for the common case
+        }
+
+        return list;
+    }
+
+    /// <summary>Full path, normalized: GetFullPath, trailing separator removed, compared case-insensitively.</summary>
+    private static string NormalizePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        try { return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)); }
+        catch { return string.Empty; }
+    }
+
+    private static string ComposePath(string parentPath, string name)
+    {
+        if (string.IsNullOrWhiteSpace(parentPath)) return string.Empty;
+        try { return NormalizePath(Path.Combine(parentPath, name)); }
+        catch { return string.Empty; }
+    }
+
+    /// <summary>
+    /// Path-level check: is this path (or an ancestor, for protected subtrees) off limits?
+    /// Returns the most specific matching rule, so the reason names the real owner.
+    /// </summary>
+    internal static bool TryGetProtectedVerdict(string fullPath, out CleanVerdict verdict, out string reason)
+    {
+        verdict = CleanVerdict.Unknown;
+        reason = string.Empty;
+        var normalized = NormalizePath(fullPath);
+        if (normalized.Length == 0) return false;
+
+        ProtectedPath? best = null;
+        foreach (var guard in ProtectedPaths.Value)
+        {
+            var hit = string.Equals(normalized, guard.Root, StringComparison.OrdinalIgnoreCase) ||
+                      (guard.Children && normalized.StartsWith(guard.Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+            if (hit && (best is null || guard.Root.Length > best.Root.Length)) best = guard;
+        }
+
+        if (best is null) return false;
+        verdict = best.Verdict;
+        reason = best.Reason;
+        return true;
+    }
+
+    /// <summary>Used by the cleaner: a protected path may never be deleted; the reason is shown to the user.</summary>
+    internal static bool IsProtectedPath(string fullPath, out string reason) =>
+        TryGetProtectedVerdict(fullPath, out _, out reason);
+
+    /// <summary>
+    /// bin/obj are only caches when they really ARE build output. A name is not evidence:
+    /// require a project file next door, obj/project.assets.json, or a Debug/Release child.
+    /// (internal: the self test asserts this predicate directly, because it can only create probe
+    /// trees inside the workspace, and the analyzer protects everything under the user's Documents.)
+    /// </summary>
+    internal static bool LooksLikeBuildOutput(string fullPath)
+    {
+        if (fullPath.Length == 0) return false;
+        try
+        {
+            var projectDir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(projectDir) && Directory.Exists(projectDir))
+            {
+                foreach (var pattern in new[] { "*.csproj", "*.vbproj", "*.fsproj", "*.sln" })
+                {
+                    if (Directory.EnumerateFiles(projectDir, pattern).Any()) return true;
+                }
+            }
+            if (!Directory.Exists(fullPath)) return false;
+            if (File.Exists(Path.Combine(fullPath, "project.assets.json"))) return true;   // obj: NuGet restore output
+            if (Directory.Exists(Path.Combine(fullPath, "Debug")) || Directory.Exists(Path.Combine(fullPath, "Release")))
+                return true;
+        }
+        catch
+        {
+            // unreadable: no evidence
+        }
+        return false;
+    }
 
     /// <summary>Vendor data folders live under AppData; their caches are one level deeper.</summary>
     private static bool UnderAppData(string path) =>
@@ -117,6 +288,17 @@ internal static class DirectoryAnalyzer
                 reason = "你在「保留清单」里标记过：程序和数据都别动（缓存仍可清）";
                 return CleanVerdict.Kept;
             }
+        }
+
+        // Path-level gate FIRST (B1): a protected path is decided by where it lives, not by its
+        // name. Applies to the "whole-name" rules below and to the "name contains" ones, and to
+        // files as well (a x.tmp sitting inside Packages is still store-app data).
+        var candidatePath = ComposePath(parentPath, name);
+        if (candidatePath.Length > 0 &&
+            TryGetProtectedVerdict(candidatePath, out var protectedVerdict, out var protectedReason))
+        {
+            reason = protectedReason;
+            return protectedVerdict;
         }
 
         foreach (var system in SystemNames)
@@ -153,6 +335,17 @@ internal static class DirectoryAnalyzer
         {
             if (lower.Contains(word, StringComparison.Ordinal))
             {
+                // bin/obj 是 B1 的重灾区：名字对上只是"像构建输出"，要看到构建产物才算数。
+                if (word is "bin" or "obj")
+                {
+                    if (lower is "bin" or "obj" && LooksLikeBuildOutput(candidatePath))
+                    {
+                        reason = $"「{word}」是构建输出（同级有 csproj/sln，或 bin 下有 Debug/Release）：重新构建会生成";
+                        return CleanVerdict.SafeCache;
+                    }
+                    reason = $"名字含「{word}」，但没看到构建产物证据（csproj/sln、project.assets.json、Debug/Release）：先别删";
+                    return CleanVerdict.Unknown;
+                }
                 if (lower.Contains("node_modules", StringComparison.Ordinal))
                 {
                     reason = "项目依赖，删掉能省空间，但项目下次要重新 npm install";

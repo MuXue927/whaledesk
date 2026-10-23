@@ -221,7 +221,10 @@ internal sealed partial class CleanupPanel : Border
 
         _hint.FontFamily = Font; _hint.FontSize = 10; _hint.Foreground = Muted;
         _hint.TextWrapping = TextWrapping.Wrap; _hint.Margin = new Thickness(0, 5, 0, 0);
-        _hint.Text = "拖动四个边框可调整面板大小（向外变大、向内变小）；点任意一行可展开它的完整说明（作用 / 删除影响 / 结论）。删除默认进回收站，可还原。";
+        _hint.Text = "拖动四个边框可调整面板大小（向外变大、向内变小）；点任意一行可展开它的完整说明（作用 / 删除影响 / 结论）。"
+                   + (RecycleBin.CanUndelete()
+                        ? "删除默认进回收站，可还原。"
+                        : "注意：这台机器的回收站已被组策略关闭，删除是永久删除、无法还原。");
         root.Children.Add(_hint);
 
         BuildRows();
@@ -814,7 +817,8 @@ internal sealed partial class CleanupPanel : Border
         _summary.Text = result.Error is null
             ? $"已清理 {Monitoring.Fmt.Bytes((ulong)Math.Max(0, result.Bytes))}"
               + (result.Skipped > 0 ? $"，{result.Skipped} 项被跳过（占用中）" : "")
-              + "（已进回收站，可还原）"
+              // 只有回收站真的接住了才敢说"可还原"（组策略关掉回收站时 Shell 是永久删除）。
+              + (RecycleBin.CanUndelete() ? "（已进回收站，可还原）" : "（已永久删除，回收站已被关闭，无法还原）")
             : (row?.Target.Label ?? result.TargetId) + "：" + result.Error;
     }
 

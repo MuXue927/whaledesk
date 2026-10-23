@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace WhaleDesk;
 
@@ -32,6 +33,10 @@ internal sealed class MenuWindow : Window
     private readonly double _scale;        // DPI scale of the pet's monitor
     private readonly StackPanel _rows = new();
     private SubMenuWindow? _sub;
+    private MenuSection? _subSection;          // group the live flyout is showing
+    private MenuSection? _pendingSection;      // hover that has not opened yet
+    private FrameworkElement? _pendingAnchor;
+    private readonly DispatcherTimer _hoverTimer;
 
     private static readonly Brush Bg = new SolidColorBrush(Color.FromArgb(0xF4, 0x12, 0x1A, 0x2C));
     private static readonly Brush Hover = new SolidColorBrush(Color.FromArgb(0x44, 0x8A, 0xB4, 0xFF));
@@ -60,6 +65,24 @@ internal sealed class MenuWindow : Window
         MaxHeight = Math.Max(240, workAreaPhysical.Height / _scale - 40);
         Width = 232;
         ShowActivated = true;
+
+        // Hover opens a group's flyout, but only after a short dwell: sweeping the pointer
+        // down the column used to destroy and rebuild a flyout for every group it crossed
+        // (each rebuild showed up as "the sub panel flashes, then flashes somewhere else").
+        // Clicking a row still opens immediately - the timer is just cancelled first.
+        _hoverTimer = new DispatcherTimer(DispatcherPriority.Normal)
+        {
+            Interval = TimeSpan.FromMilliseconds(250),
+        };
+        _hoverTimer.Tick += (_, _) =>
+        {
+            _hoverTimer.Stop();
+            var section = _pendingSection;
+            var anchor = _pendingAnchor;
+            _pendingSection = null;
+            _pendingAnchor = null;
+            if (section is not null && anchor is not null) OpenSection(section, anchor);
+        };
 
         Content = Build();
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
@@ -133,10 +156,27 @@ internal sealed class MenuWindow : Window
         grid.Children.Add(count);
         row.Child = grid;
 
-        void Open() => OpenSection(section, row);
-        row.MouseEnter += (_, _) => { row.Background = Hover; Open(); };
-        row.MouseLeave += (_, _) => row.Background = Brushes.Transparent;
-        row.MouseLeftButtonUp += (_, _) => Open();
+        // Armed here, fired by _hoverTimer.Tick; MouseLeave disarms it again, so merely
+        // passing over a group never builds a flyout.
+        void ArmHover()
+        {
+            _pendingSection = section;
+            _pendingAnchor = row;
+            _hoverTimer.Stop();
+            _hoverTimer.Start();
+        }
+
+        void CancelHover()
+        {
+            if (!ReferenceEquals(_pendingAnchor, row)) return;
+            _hoverTimer.Stop();
+            _pendingSection = null;
+            _pendingAnchor = null;
+        }
+
+        row.MouseEnter += (_, _) => { row.Background = Hover; ArmHover(); };
+        row.MouseLeave += (_, _) => { row.Background = Brushes.Transparent; CancelHover(); };
+        row.MouseLeftButtonUp += (_, _) => { CancelHover(); OpenSection(section, row); };
         return row;
     }
 
@@ -198,15 +238,35 @@ internal sealed class MenuWindow : Window
     {
         try
         {
-            CloseSub();
+            _hoverTimer.Stop();
+            _pendingSection = null;
+            _pendingAnchor = null;
+
+            // Idempotent: this exact group is already on screen (hover opened it, or the
+            // press landed on the row that is already showing). Rebuilding here is what
+            // produced the "sub panel flashes" effect, so do nothing at all.
+            if (_sub is not null && ReferenceEquals(_subSection, section) && _sub.IsVisible) return;
+
             var offset = anchor.TransformToAncestor(this).Transform(new Point(0, 0));
             var handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
             if (handle == IntPtr.Zero || !Win32.GetWindowRect(handle, out var parentRect)) return;
             var rowTopPhysical = parentRect.Top + offset.Y * _scale;
-            _sub = new SubMenuWindow(section.Title, section.Items, Activate,
-                rowTopPhysical, parentRect.Left, parentRect.Right - parentRect.Left, _workArea, _scale);
-            _sub.Show();
+
+            // A flyout that is closed (or whose Show() failed) must not be reused.
+            if (_sub is not null && !_sub.IsVisible) CloseSub();
+
+            // One flyout window per menu session: switching groups refills it in place
+            // instead of closing it and constructing a new window. Filled before Show()
+            // so even the first appearance never renders an empty box at the origin.
+            if (_sub is null)
+            {
+                _sub = new SubMenuWindow(_workArea, _scale, Activate);
+            }
+            _sub.Fill(section.Title, section.Items,
+                rowTopPhysical, parentRect.Left, parentRect.Right - parentRect.Left);
+            if (!_sub.IsVisible) _sub.Show();
             _sub.Place();
+            _subSection = section;
         }
         catch
         {
@@ -216,8 +276,12 @@ internal sealed class MenuWindow : Window
 
     private void CloseSub()
     {
+        _hoverTimer.Stop();
+        _pendingSection = null;
+        _pendingAnchor = null;
         _sub?.Close();
         _sub = null;
+        _subSection = null;
     }
 
     /// <summary>
@@ -270,9 +334,16 @@ internal sealed class MenuWindow : Window
 internal sealed class SubMenuWindow : Window
 {
     private readonly Rect _workArea;      // PHYSICAL
-    private readonly double _anchorTopPhysical;
-    private readonly double _parentLeftPhysical;
-    private readonly double _parentWidthPhysical;
+    private readonly Action<PetMenuEntry> _onPick;
+    private readonly StackPanel _stack = new() { Margin = new Thickness(8) };
+    private readonly TextBlock _heading;
+    private readonly ScrollViewer _scroll;
+
+    // Re-pointed by Fill(): the flyout is reused for every group of one menu, so its anchor
+    // is no longer fixed for the lifetime of the window.
+    private double _anchorTopPhysical;
+    private double _parentLeftPhysical;
+    private double _parentWidthPhysical;
     private readonly double _scale;
 
     private static readonly Brush Bg = new SolidColorBrush(Color.FromArgb(0xF6, 0x14, 0x1E, 0x32));
@@ -281,16 +352,13 @@ internal sealed class SubMenuWindow : Window
     private static readonly Brush Dim = new SolidColorBrush(Color.FromRgb(0xA8, 0xB6, 0xD8));
     private static readonly Brush Teal = new SolidColorBrush(Color.FromRgb(0x7F, 0xE0, 0xD8));
 
-    public SubMenuWindow(string title, IReadOnlyList<PetMenuEntry> items, Action<PetMenuEntry> onPick,
-        double anchorTopPhysical, double parentLeftPhysical, double parentWidthPhysical, Rect workAreaPhysical, double scale)
+    public SubMenuWindow(Rect workAreaPhysical, double scale, Action<PetMenuEntry> onPick)
     {
-        _anchorTopPhysical = anchorTopPhysical;
-        _parentLeftPhysical = parentLeftPhysical;
-        _parentWidthPhysical = parentWidthPhysical;
+        _onPick = onPick;
         _workArea = workAreaPhysical;
         _scale = scale <= 0 ? 1.0 : scale;
 
-        Title = title;
+        Title = "小鲸娘";
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -302,19 +370,55 @@ internal sealed class SubMenuWindow : Window
         Width = 244;
         ShowActivated = false;
 
-        var stack = new StackPanel { Margin = new Thickness(8) };
-        stack.Children.Add(new TextBlock
+        _heading = new TextBlock
         {
-            Text = title,
             FontSize = 10,
             Foreground = Dim,
             Margin = new Thickness(6, 2, 0, 4),
-        });
+        };
+        _stack.Children.Add(_heading);
+
+        _scroll = new ScrollViewer
+        {
+            Content = _stack,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = Math.Max(180, workAreaPhysical.Height / _scale - 100),
+        };
+        ThinScrollBar.Apply(_scroll);
+
+        Content = new Border
+        {
+            Background = Bg,
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, 0x8A, 0xB4, 0xFF)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Child = _scroll,
+        };
+    }
+
+    /// <summary>
+    /// Point this (reused) flyout at a group: swap the rows, remember the new anchor.
+    /// Reusing one window, and calling this only when the group actually changed, is what
+    /// stops the flyout from being destroyed and re-created while the mouse sweeps the menu.
+    /// </summary>
+    public void Fill(string title, IReadOnlyList<PetMenuEntry> items,
+        double anchorTopPhysical, double parentLeftPhysical, double parentWidthPhysical)
+    {
+        Title = title;
+        _heading.Text = title;
+        _anchorTopPhysical = anchorTopPhysical;
+        _parentLeftPhysical = parentLeftPhysical;
+        _parentWidthPhysical = parentWidthPhysical;
+
+        // Keep the heading (child 0), drop the previous group's rows.
+        while (_stack.Children.Count > 1) _stack.Children.RemoveAt(_stack.Children.Count - 1);
+
         foreach (var entry in items)
         {
             if (entry.Separator)
             {
-                stack.Children.Add(new Border
+                _stack.Children.Add(new Border
                 {
                     Height = 1,
                     Margin = new Thickness(4, 3, 4, 3),
@@ -340,30 +444,16 @@ internal sealed class SubMenuWindow : Window
             };
             if (entry.Enabled)
             {
-                row.MouseLeftButtonUp += (_, _) => onPick(entry);
+                row.MouseLeftButtonUp += (_, _) => _onPick(entry);
                 row.MouseEnter += (_, _) => row.Background = Hover;
                 row.MouseLeave += (_, _) => row.Background = Brushes.Transparent;
             }
-            stack.Children.Add(row);
+            _stack.Children.Add(row);
         }
 
-        var scroll = new ScrollViewer
-        {
-            Content = stack,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            MaxHeight = Math.Max(180, workAreaPhysical.Height / _scale - 100),
-        };
-        ThinScrollBar.Apply(scroll);
-
-        Content = new Border
-        {
-            Background = Bg,
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, 0x8A, 0xB4, 0xFF)),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(10),
-            Child = scroll,
-        };
+        // A reused window keeps the previous group's scroll offset otherwise, which would
+        // show the new group half-way down.
+        _scroll.ScrollToTop();
     }
 
     public void Place()

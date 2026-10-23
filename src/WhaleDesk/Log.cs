@@ -8,27 +8,49 @@ namespace WhaleDesk;
 /// Minimal logger: everything goes to the console (captured by the verification
 /// scripts) and to build/whaledesk.log so a failure can be read after the
 /// process is gone.
+///
+/// v0.24.4 opened and closed the file on EVERY line (File.AppendAllText) and only
+/// checked the 2 MB limit in the constructor. Follow-cursor alone writes a line every
+/// 50 ms step, so a long-running session grew the log without bound (1.38 MB /
+/// 11 707 lines in one day on the machine this was found on). The handle is now kept
+/// open, and the rotation check also runs while writing.
 /// </summary>
 internal sealed class Log
 {
+    private const long MaxBytes = 2 * 1024 * 1024;
     private readonly string _path;
     private readonly object _gate = new();
+    private StreamWriter? _writer;
+    private long _bytes;
 
     public Log(string path)
     {
         _path = path;
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        try
+        lock (_gate)
         {
-            // Append instead of truncate: several verification runs in a row must all
-            // survive in one file, otherwise the evidence of an earlier run is lost
-            // the moment the next one starts. Rotate at 2 MB to stay bounded.
-            if (File.Exists(path) && new FileInfo(path).Length > 2 * 1024 * 1024)
-                File.Move(path, path + ".1", overwrite: true);
-            File.AppendAllText(_path, $"# WhaleDesk run {DateTime.Now:yyyy-MM-dd HH:mm:ss} (pid {Environment.ProcessId}){Environment.NewLine}");
+            try
+            {
+                // Append instead of truncate: several verification runs in a row must all
+                // survive in one file, otherwise the evidence of an earlier run is lost
+                // the moment the next one starts.
+                if (File.Exists(_path) && new FileInfo(_path).Length > MaxBytes)
+                    File.Move(_path, _path + ".1", overwrite: true);
+                OpenLocked();
+                _writer!.WriteLine($"# WhaleDesk run {DateTime.Now:yyyy-MM-dd HH:mm:ss} (pid {Environment.ProcessId})");
+            }
+            catch { /* logging must never take the app down */ }
         }
-        catch { /* logging must never take the app down */ }
+    }
+
+    private void OpenLocked()
+    {
+        _writer?.Dispose();
+        var stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+        // No BOM: the logs are read by scripts and grep, and a BOM breaks the first comparison.
+        _writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+        _bytes = stream.Length;
     }
 
     public void Info(string message) => Write("INFO", message);
@@ -61,7 +83,33 @@ internal sealed class Log
         lock (_gate)
         {
             Console.WriteLine(line);
-            try { File.AppendAllText(_path, line + Environment.NewLine); } catch { }
+            try
+            {
+                if (_writer is null) OpenLocked();
+                _writer!.WriteLine(line);
+                _bytes += Encoding.UTF8.GetByteCount(line) + Environment.NewLine.Length;
+                if (_bytes > MaxBytes) RotateLocked();
+            }
+            catch { /* logging must never take the app down */ }
+        }
+    }
+
+    /// <summary>Rotate while running, not just at startup, so a week-long session stays bounded.</summary>
+    private void RotateLocked()
+    {
+        try
+        {
+            _writer?.Dispose();
+            _writer = null;
+            File.Move(_path, _path + ".1", overwrite: true);
+            OpenLocked();
+            _writer!.WriteLine($"# log rotated at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        }
+        catch
+        {
+            // Move failed (file locked): reopen the current file and keep logging; the size
+            // check simply retries on the next line.
+            try { if (_writer is null) OpenLocked(); } catch { }
         }
     }
 

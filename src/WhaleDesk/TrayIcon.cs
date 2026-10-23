@@ -9,9 +9,13 @@ namespace WhaleDesk;
 /// process. WinForms NotifyIcon is used deliberately: it is part of the bundled
 /// WindowsDesktop runtime, so no extra package is needed.
 ///
-/// Two lessons from the user's bug report are baked in:
+/// Three lessons from the user's bug report are baked in:
 ///  * a LEFT single click toggles visibility (before, only double-click worked, so
 ///    the icon looked dead in a classic Windows 10 style tray);
+///  * a DOUBLE click must still toggle only ONCE: WinForms reports the first press of a
+///    double click as MouseClick and the second as DoubleClick, so the old
+///    "MouseClick -> toggle, DoubleClick -> toggle" pair switched her off again right
+///    after switching her on (the pet/panel "flashed and vanished");
 ///  * the icon is loaded at the system's small-icon size instead of letting the
 ///    multi-size .ico pick, which renders badly in the notification area.
 /// </summary>
@@ -22,6 +26,13 @@ internal sealed class TrayIcon : IDisposable
     private readonly ToolStripMenuItem _toggle;
     private readonly ToolStripMenuItem _pause;
     private string _hotkey = "Ctrl+Alt+W";
+
+    /// <summary>
+    /// Environment.TickCount64 of the last accepted left click; 0 = none yet. A DoubleClick
+    /// is always preceded by a MouseClick for the same gesture, so this timestamp is what
+    /// lets the second half of a double click be recognised and dropped.
+    /// </summary>
+    private long _lastLeftClickTicks;
 
     /// <summary>The combination that actually registered on this machine, for the hint text.</summary>
     public void SetHotkeyName(string name)
@@ -85,8 +96,30 @@ internal sealed class TrayIcon : IDisposable
             Visible = true,
             ContextMenuStrip = menu,
         };
-        _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) onToggle(); };
-        _icon.DoubleClick += (_, _) => onToggle();
+        // Double click no longer toggles a second time. NotifyIcon reports a double click
+        // in two events (MouseClick for the first press, then DoubleClick), and depending
+        // on timing the second MouseClick instead - subscribing to both is what made one
+        // gesture toggle twice. One handler, one rule:
+        //   * only MouseClick (left) toggles;
+        //   * a left click that arrives within SystemInformation.DoubleClickTime of the
+        //     previous accepted one is part of the same gesture and is ignored.
+        // Behaviour change (user visible): double-clicking the icon toggles exactly once,
+        // and two very fast deliberate clicks collapse into one toggle. DoubleClickTime is
+        // the window Windows itself uses to decide "this is a double click", so no normal
+        // single click is ever swallowed while both possible event orderings are covered.
+        _icon.MouseClick += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            var now = Environment.TickCount64;
+            var debounceMs = Math.Max(200, SystemInformation.DoubleClickTime);
+            if (_lastLeftClickTicks != 0 && now - _lastLeftClickTicks < debounceMs)
+            {
+                _log.Info($"tray left click ignored: {now - _lastLeftClickTicks}ms after the previous one (< {debounceMs}ms double-click window)");
+                return;
+            }
+            _lastLeftClickTicks = now;
+            onToggle();
+        };
         _log.Info($"tray icon created (icon={(icon is null ? "fallback" : "tray.ico, small size")}, monitors={monitors.Count})");
     }
 

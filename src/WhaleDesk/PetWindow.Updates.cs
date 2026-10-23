@@ -40,15 +40,33 @@ internal sealed partial class PetWindow
 
     private void OpenReleasePage(string url)
     {
+        // 这个 URL 来自 GitHub API 响应，而更新检查是主动支持系统代理的：代理一旦被劫持，
+        // "打开哪个地址"就等于由响应内容决定。只允许 https://github.com/<本仓库>/… ，
+        // 其余一律回退到固定模板页面。
+        var safe = SafeReleaseUrl(url);
+        if (!string.Equals(safe, url, StringComparison.OrdinalIgnoreCase))
+            _log.Warn("release url rejected, opening the canonical page instead: " + url);
         try
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
-            _log.Info("opened release page: " + url);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(safe) { UseShellExecute = true });
+            _log.Info("opened release page: " + safe);
         }
         catch (Exception ex)
         {
             _log.Warn("could not open release page: " + ex.Message);
         }
+    }
+
+    /// <summary>Only our own repository over https may be opened.</summary>
+    private static string SafeReleaseUrl(string? url)
+    {
+        var canonical = $"https://github.com/{UpdateChecker.DefaultRepo}/releases";
+        if (string.IsNullOrWhiteSpace(url)) return canonical;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return canonical;
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return canonical;
+        if (!string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase)) return canonical;
+        if (!uri.AbsolutePath.StartsWith("/" + UpdateChecker.DefaultRepo + "/", StringComparison.OrdinalIgnoreCase)) return canonical;
+        return uri.ToString();
     }
 
     /// <summary>--probe-update: run one live check and print the outcome.</summary>

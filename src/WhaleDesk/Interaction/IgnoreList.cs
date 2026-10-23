@@ -34,7 +34,10 @@ internal sealed class IgnoreList
         {
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, JsonSerializer.Serialize(Entries, Json));
+            // 原子写（同 KeepList）：避免半截 JSON 被 Load 当成"空清单"而把用户的忽略项清光。
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(Entries, Json));
+            File.Move(tmp, path, overwrite: true);
         }
         catch { /* keep working in memory */ }
     }
