@@ -1243,7 +1243,11 @@ internal sealed partial class PetWindow : Window
             var progress = new Progress<string>(message =>
             {
                 _log.Info($"open-DSH bubble: {message}");
-                ShowLocalBubble(message, 90_000, force: true);
+                // 90 s（v0.24.4 的值）是为"冷启动可能很慢"猜的，但它同时把气泡锁死了：PollStateAsync
+                // 的成功分支只在 hold 过期后才允许用 DSH 的文案覆盖屏幕，于是启动完成之后
+                // "DSH 已经打开了"还会继续挂一分半。进度行本来就会被下一条进度替换，8 s 足够兜住
+                // 一步慢操作，超时后立刻把气泡还给 DSH。
+                ShowLocalBubble(message, 8_000, force: true);
             });
             var result = await _dsh.BringToFrontAsync(progress);
             if (!string.IsNullOrWhiteSpace(result.ExePath))
@@ -1252,7 +1256,9 @@ internal sealed partial class PetWindow : Window
                 Persist();
             }
 
-            ShowLocalBubble(result.UserMessage, 9_000, force: true);
+            // 启动流程已经结束，确认语只需要 4 s：之后 DSH 有自己的话说就显示它的话，
+            // 没话说（空文案）就清空，不再由本地台词长期霸屏。
+            ShowLocalBubble(result.UserMessage, 4_000, force: true);
             _log.Info(
                 $"open-DSH completed outcome={result.Outcome} mechanism={result.Mechanism} " +
                 $"elapsedMs={result.ElapsedMs} processes={result.ProcessCountBefore}->{result.ProcessCountAfter}");
