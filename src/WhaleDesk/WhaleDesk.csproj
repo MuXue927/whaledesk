@@ -17,8 +17,8 @@
     <Product>小鲸娘桌面伴侣 (WhaleDesk)</Product>
     <Description>Desktop companion pet with DSH integration, system monitoring and cleanup helpers.</Description>
     <Copyright>WhaleDesk contributors. Sprite art: original author @linxin666 (not redistributed alone).</Copyright>
-    <Version>0.24.4</Version>
-    <FileVersion>0.24.4.0</FileVersion>
+    <Version>0.24.5</Version>
+    <FileVersion>0.24.5.0</FileVersion>
     <ApplicationIcon>..\..\assets\whaledesk.ico</ApplicationIcon>
     <InvariantGlobalization>true</InvariantGlobalization>
     <!-- framework-dependent: the machine already has Microsoft.WindowsDesktop.App 9.0.19 -->
