@@ -1,6 +1,6 @@
 # WhaleDesk 小鲸娘桌面伴侣
 
-[![Release v0.24.4](https://img.shields.io/github/v/release/MuXue927/whaledesk?label=release&color=2ea44f)](https://github.com/MuXue927/whaledesk/releases/tag/v0.24.1)
+[![Release v0.24.5](https://img.shields.io/github/v/release/MuXue927/whaledesk?label=release&color=2ea44f)](https://github.com/MuXue927/whaledesk/releases/tag/v0.24.5)
 
 一个 .NET 9 WPF 桌面宠物：住在桌面右下角，陪你看 DSH 会话状态、监控内存/磁盘/GPU、
 做 C 盘清理与空间分析，还有跟随光标、专注番茄钟、剪贴板历史、久坐提醒等小功能。
@@ -9,7 +9,7 @@
 
 | 平台 | 状态 | 说明 |
 |---|---|---|
-| **Windows 10 / 11（x64）** | ✅ **已支持并实测** | 唯一受支持的平台；当前版本在 Windows 11 上完成 126 项自检、清理演练与真机截图验证 |
+| **Windows 10 / 11（x64）** | ✅ **已支持并实测** | 唯一受支持的平台；当前版本在 Windows 11 上完成 139 项自检（134 通过 + 5 条环境受限跳过）、清理演练与真机截图验证 |
 | macOS（Intel / Apple Silicon） | ❌ **不支持** | 技术栈为 WPF + Win32 API，**无法在 macOS 上运行**（不是"没测"，是跑不起来） |
 | Linux（X11 / Wayland） | ❌ **不支持** | 同上；且目标用户较少，暂无计划 |
 
@@ -37,7 +37,7 @@ Apple 开发者账号做签名与 notarization；**在没有 Mac 真机验证的
 
 ## 自包含版（不需要 .NET）
 
-**从 v0.24.2 起，Release 里直接提供自包含包**：`WhaleDesk-0.24.2-selfcontained.zip`（约 67 MB，解压后约 150 MB，自带 .NET 运行时，目标机不用装 .NET）。
+**从 v0.24.2 起，Release 里直接提供自包含包**：当前是 `WhaleDesk-0.24.5-selfcontained.zip`（约 68.5 MB，解压后约 158 MB，自带 .NET 运行时，目标机不用装 .NET）。
 
 也可以自己构建：
 ```
@@ -48,11 +48,12 @@ whaledesk\scripts\build-dist-selfcontained.cmd
 ## 命令行
 | 开关 | 作用 |
 |---|---|
-| `--selftest` | 126 项自检 |
+| `--selftest` | 139 项自检（134 通过 + 5 条环境受限跳过） |
 | `--rehearsal` | 清理演练（dry-run） |
 | `--probe-update` | 检查 GitHub Releases 有没有新版本 |
 | `--probe-dsh-api` | 探测 DSH 接口（自动发现端口） |
 | `--probe-hotplug` | DSH 掉线/恢复端到端测试 |
+| `--no-discovery` | 测试用：钉住当前端口，不做端口重新发现 |
 | `--help` | 全部开关 |
 
 ## 防"未知发布者"提示

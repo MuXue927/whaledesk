@@ -33,7 +33,7 @@ FileVersion 重新生成。`install.cmd` 是**通用安装器**（把同目录�
 ## 诊断
 主要验证统一用 exe 自带探针，不需要额外脚本：
 ```
-WhaleDesk.exe --selftest                 # 126 项逻辑/采样自检
+WhaleDesk.exe --selftest                 # 139 条自检报告（134 通过 + 5 条环境受限跳过）
 WhaleDesk.exe --rehearsal                # 清理 dry-run（不删除）
 WhaleDesk.exe --live --seconds 10 --probe-menu-monitor 0
 WhaleDesk.exe --live --seconds 12 --probe-dsh-api
