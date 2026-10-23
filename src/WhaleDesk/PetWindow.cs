@@ -890,6 +890,11 @@ internal sealed partial class PetWindow : Window
             if (Environment.TickCount64 >= _localBubbleUntilMs &&
                 !string.Equals(state.Bubble ?? "", _visual.BubbleText ?? "", StringComparison.Ordinal))
             {
+                // 留一行日志：本地台词被 DSH 接管或清空的时刻，出问题时能直接从日志看出"谁压住了气泡"。
+                var onScreen = (_visual.BubbleText ?? "").Trim();
+                _log.Info(string.IsNullOrEmpty(state.Bubble)
+                    ? $"bubble cleared: DSH has nothing to say (was '{onScreen}')"
+                    : $"bubble <- DSH: {state.Bubble} (was '{onScreen}')");
                 _visual.SetBubble(state.Bubble);
             }
         }
