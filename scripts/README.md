@@ -26,7 +26,7 @@ FileVersion 重新生成。`install.cmd` 是**通用安装器**（把同目录�
 | 文件 | 作用 |
 |---|---|
 | `publish-github.ps1` | 建仓库→push→创建 Release 并上传 zip（token 交互输入，只在本进程内存中使用） |
-| `PUBLISH-GITHUB.md` | 发布步骤说明 |
+| `PUBLISH-GITHUB.md` | 发布步骤说明（日常发布用 `gh release create`；本机 `gh` 已登录，见文首现状说明） |
 | `unblock-files.ps1` | 批量解除下载文件的 Mark-of-the-Web（消除"打开文件-安全警告"） |
 | `sign-self.cmd` | 本机自签名 exe（只对本机有效，不能替代 CA 证书） |
 
