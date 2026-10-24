@@ -128,6 +128,142 @@ internal static class SelfTest
         var (cX, cY) = Placement.Clamp(mon, -500, -400, 300, 365);
         Check("clamp-into-work-area", cX == 0 && cY == 0, $"clamped to {cX},{cY}");
 
+        // Task board watcher: pure parsing + the "running -> done/failed" transition rule.
+        var taskBoardFixture = """
+        {"schemaVersion":6,"tasks":[
+          {"id":"a","title":"run the build","status":"running","updatedAt":1792851239667},
+          {"id":"b","title":"write docs","status":"todo","updatedAt":1792851239667},
+          {"id":"c","title":"wrap up","status":"done","updatedAt":1792851239667}]}
+        """;
+        var parsedBoard = Monitoring.TaskBoardWatch.Parse(taskBoardFixture);
+        Check("taskboard-parse",
+            parsedBoard is not null && parsedBoard.Tasks.Count == 3 && parsedBoard.Running == 1 && parsedBoard.Todo == 1,
+            parsedBoard is null
+                ? "parse returned null"
+                : $"tasks={parsedBoard.Tasks.Count} running={parsedBoard.Running} todo={parsedBoard.Todo} doneToday={parsedBoard.DoneToday}");
+
+        Check("taskboard-rejects-nonsense",
+            Monitoring.TaskBoardWatch.Parse("not json") is null &&
+            Monitoring.TaskBoardWatch.Parse("{\"noTasks\":1}") is null &&
+            Monitoring.TaskBoardWatch.Parse("") is null,
+            "garbage / wrong-shape / empty all degrade to null instead of throwing");
+
+        var boardBefore = Monitoring.TaskBoardWatch.Parse(
+            """{"tasks":[{"id":"a","title":"run","status":"running"},{"id":"b","title":"wait","status":"running"}]}""");
+        var boardAfter = Monitoring.TaskBoardWatch.Parse(
+            """{"tasks":[{"id":"a","title":"run","status":"done"},{"id":"b","title":"wait","status":"todo"}]}""");
+        var finishedCards = Monitoring.TaskBoardWatch.FinishedBetween(boardBefore, boardAfter);
+        Check("taskboard-finished-between",
+            finishedCards.Count == 1 && finishedCards[0].Id == "a",
+            $"finished={finishedCards.Count} ids={string.Join(",", finishedCards.Select(c => c.Id))} (todo must not be announced)");
+
+        // Disk trend: 14 GB lost over 7 days => 2 GB/day; with 56 GB left that is 28 days.
+        var trendSamples = Monitoring.PowerAndDisk.ParseTrend("""
+        [{"drive":"C:\\","date":"2026-10-01","free":70000000000},
+         {"drive":"C:\\","date":"2026-10-08","free":56000000000}]
+        """);
+        var (perDayMb, daysLeft) = Monitoring.PowerAndDisk.Estimate(trendSamples, @"C:\", 56000000000);
+        Check("disk-trend-projection",
+            trendSamples.Count == 2 && perDayMb < -1900 && perDayMb > -2100 && daysLeft >= 27 && daysLeft <= 29,
+            $"samples={trendSamples.Count} perDay={perDayMb:F0}MB daysUntilFull={daysLeft} (expected ~-2000MB / 28 days)");
+
+        var flatTrend = Monitoring.PowerAndDisk.Estimate(
+            Monitoring.PowerAndDisk.ParseTrend("""[{"drive":"C:\\","date":"2026-10-01","free":1},{"drive":"C:\\","date":"2026-10-08","free":2}]"""),
+            @"C:\", 2);
+        Check("disk-trend-growing-disk", flatTrend.DaysUntilFull == 0 && flatTrend.PerDayMb > -1,
+            $"a disk that is not shrinking must not produce a 'days until full' number (got {flatTrend.DaysUntilFull})");
+
+        // Battery alert policy: one warning per episode, re-armed only by AC or recovery above 25%.
+        var lowBattery = new Monitoring.BatteryInfo(15, OnExternalPower: false, Charging: false, Low: true);
+        var lowBattery20 = new Monitoring.BatteryInfo(20, false, false, true);
+        var chargingBattery = new Monitoring.BatteryInfo(15, true, true, false);
+        var healthyBattery = new Monitoring.BatteryInfo(80, false, false, false);
+        Check("battery-alert-policy",
+            Monitoring.PowerAndDisk.ShouldWarnLowBattery(lowBattery, alreadyWarned: false) &&
+            Monitoring.PowerAndDisk.ShouldWarnLowBattery(lowBattery20, alreadyWarned: false) &&
+            !Monitoring.PowerAndDisk.ShouldWarnLowBattery(lowBattery, alreadyWarned: true) &&
+            !Monitoring.PowerAndDisk.ShouldWarnLowBattery(chargingBattery, alreadyWarned: false) &&
+            !Monitoring.PowerAndDisk.ShouldWarnLowBattery(healthyBattery, alreadyWarned: false) &&
+            Monitoring.PowerAndDisk.RearmLowBattery(chargingBattery) &&
+            Monitoring.PowerAndDisk.RearmLowBattery(healthyBattery) &&
+            !Monitoring.PowerAndDisk.RearmLowBattery(lowBattery),
+            "warn once per episode (not per percent), stay quiet on AC, re-arm on AC / above 25%");
+
+        // Plugin updates: dependency parsing + version comparison (no network needed).
+        var pluginDeps = Monitoring.PluginUpdates.ParseDependencies(
+            """{"dependencies":{"dsh-context":"0.74.0","@linxin666/dsh-web-all":"^0.4.8"}}""");
+        Check("plugin-updates-parse",
+            pluginDeps.Count == 2 && pluginDeps.Any(d => d.Name == "dsh-context" && d.Spec == "0.74.0"),
+            $"deps={pluginDeps.Count}");
+
+        Check("plugin-updates-compare",
+            Monitoring.PluginUpdates.IsNewer("^0.4.8", "0.5.0") &&
+            Monitoring.PluginUpdates.IsNewer("3.5.4", "3.6.0") &&
+            Monitoring.PluginUpdates.IsNewer("0.9.9", "1.0.0") &&
+            !Monitoring.PluginUpdates.IsNewer("0.5.0", "0.4.9") &&
+            !Monitoring.PluginUpdates.IsNewer("1.0.0", "1.0.0") &&
+            !Monitoring.PluginUpdates.IsNewer("2.0.0", "2.0.0-beta") &&
+            !Monitoring.PluginUpdates.IsNewer("garbage", "1.0.0"),
+            "newer / older / equal / pre-release suffix / unparseable all answer correctly");
+
+        // Clipboard snippets: placeholder expansion and name handling.
+        var expanded = Interaction.SnippetStore.Expand("build {date} at {time}\n", new DateTime(2026, 10, 24, 21, 5, 0));
+        Check("snippet-placeholders",
+            expanded == "build 2026-10-24 at 21:05\n",
+            $"got '{expanded.Replace("\n", "\\n")}'");
+
+        var snippetStore = new Interaction.SnippetStore();
+        snippetStore.Add("", "first line wins\nsecond line", new DateTime(2026, 10, 24));
+        var replaced = snippetStore.Add("first line wins", "replaced text", new DateTime(2026, 10, 24));
+        Check("snippet-add-and-replace",
+            snippetStore.Items.Count == 1 && replaced.Text == "replaced text" &&
+            snippetStore.Items[0].Name == "first line wins",
+            $"items={snippetStore.Items.Count} name='{(snippetStore.Items.Count > 0 ? snippetStore.Items[0].Name : "")}' (same name replaces, empty name uses first line)");
+
+        // Search engine: the ranking rules a PowerToys-Run-style palette depends on.
+        Check("search-match-tiers",
+            Interaction.SearchEngine.Match("code", "code") == 1000 &&
+            Interaction.SearchEngine.Match("vis", "Visual Studio Code") >= 900 &&
+            Interaction.SearchEngine.Match("studio", "Visual Studio Code") >= 600 &&
+            Interaction.SearchEngine.Match("studio", "Visual Studio Code") < Interaction.SearchEngine.Match("vis", "Visual Studio Code"),
+            "exact > prefix > substring");
+
+        Check("search-acronym",
+            Interaction.SearchEngine.Match("vsc", "Visual Studio Code") >= 600 &&
+            Interaction.SearchEngine.Acronym("Visual Studio Code") == "vsc",
+            $"acronym='{Interaction.SearchEngine.Acronym("Visual Studio Code")}'");
+
+        Check("search-subsequence-and-misses",
+            Interaction.SearchEngine.Match("vscode", "Visual Studio Code") > 0 &&
+            Interaction.SearchEngine.Match("zzz", "Visual Studio Code") == 0 &&
+            Interaction.SearchEngine.Match("ocde", "code") == 0,
+            "in-order subsequence matches, out-of-order and absent characters do not");
+
+        var candidates = new[]
+        {
+            new Interaction.SearchCandidate("exact", "code", "", "code"),
+            new Interaction.SearchCandidate("loose", "corner droplet ceiling", "", "corner droplet ceiling"),
+        };
+        var ranked = Interaction.SearchEngine.Rank("code", candidates, _ => 0);
+        var boosted = Interaction.SearchEngine.Rank("code", candidates, id => id == "loose" ? 1.5 : 0);
+        Check("search-usage-never-beats-exact-match",
+            ranked.Count >= 1 && ranked[0].Candidate.Id == "exact" &&
+            boosted.Count >= 1 && boosted[0].Candidate.Id == "exact",
+            $"top={ranked[0].Candidate.Id} / boosted top={boosted[0].Candidate.Id} (a 1.5x usage boost must not lift a weak match over the exact one)");
+
+        Check("search-empty-query-returns-recents",
+            Interaction.SearchEngine.Rank("", candidates, id => id == "loose" ? 1.2 : 0).FirstOrDefault()?.Candidate.Id == "loose",
+            "with an empty query the most-used item comes first");
+
+        var calcOk1 = Interaction.SearchEngine.TryEvaluate("1+2*3", out var calc1);
+        var calcOk2 = Interaction.SearchEngine.TryEvaluate("(1+2)*3", out var calc2);
+        Check("calculator",
+            calcOk1 && Math.Abs(calc1 - 7) < 1e-9 &&
+            calcOk2 && Math.Abs(calc2 - 9) < 1e-9 &&
+            Interaction.SearchEngine.TryEvaluate("10/0", out _) == false &&
+            Interaction.SearchEngine.TryEvaluate("process.exit()", out _) == false,
+            $"1+2*3={calc1}, (1+2)*3={calc2}, division by zero and code are rejected");
+
         Check("usable-check",
             !Placement.IsUsable(mon, -900, -700, 300, 365) && Placement.IsUsable(mon, 1600, 652, 300, 365),
             "an off-screen saved rect is rejected, an on-screen one is accepted");

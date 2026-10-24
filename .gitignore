@@ -8,3 +8,5 @@ build/
 *.log
 state/
 .nuget/
+# 未实现 / 已废弃的方案草稿：只在本地保留，不进 GitHub、不进发布包
+docs/_drafts/

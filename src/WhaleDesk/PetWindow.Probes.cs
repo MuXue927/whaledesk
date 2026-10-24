@@ -340,6 +340,140 @@ internal sealed partial class PetWindow
         await Task.Delay(300);
     }
 
+    /// <summary>
+    /// <summary>--probe-auto-cleanup: run one Safe-tier cleanup pass and report the result.</summary>
+    private async Task RunAutoCleanupProbeAsync()
+    {
+        await Task.Delay(700);
+        var targets = CleanupCatalog.SafeBatch(_cleanupTempAgeDays).Where(t => t.Executable).ToList();
+        _log.Info($"CLEANUP PROBE targets={targets.Count} (Safe tier + executable only)");
+        await AutoCleanupAsync(scheduled: false).ConfigureAwait(true);
+        _log.Info("CLEANUP PROBE finished");
+        await Task.Delay(300);
+    }
+
+    /// --probe-snippets: exercise the snippet store and the clipboard panel wiring headlessly -
+    /// save, reload, expand a placeholder, build the panel and count the rendered snippet rows,
+    /// then clean the temp files up.
+    /// </summary>
+    private async Task RunSnippetsProbeAsync()
+    {
+        await Task.Delay(800);
+        // Path.GetTempPath() is a sandboxed, read-only dir in this environment (verified: access denied),
+        // so the probe uses a scratch folder next to the pet's own state instead.
+        var dir = Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "probe-snippets");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var snippetPath = Path.Combine(dir, "snippets.json");
+            var historyPath = Path.Combine(dir, "history.json");
+
+            var store = Interaction.SnippetStore.Load(snippetPath);
+            store.Add("每日模板", "日期：{date} 时间：{time}", DateTime.Now);
+            store.Add("第二段", "plain text", DateTime.Now);
+
+            // Image snippet: a 1x1 PNG is enough to prove the copy + persistence path.
+            var png = Path.Combine(dir, "source.png");
+            File.WriteAllBytes(png, Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="));
+            var imageDir = Path.Combine(dir, "snippet-images");
+            var imageSnippet = store.AddImage("图片片段", png, imageDir, DateTime.Now);
+            _log.Info($"SNIPPETS PROBE imageSnippet={(imageSnippet is null ? "FAILED" : imageSnippet.ImagePath)} " +
+                      $"copied={imageSnippet is not null && File.Exists(imageSnippet.ImagePath)}");
+            store.Save(snippetPath);
+
+            var reloaded = Interaction.SnippetStore.Load(snippetPath);
+            var expanded = reloaded.Items.Count > 0
+                ? Interaction.SnippetStore.Expand(reloaded.Items[0].Text, new DateTime(2026, 10, 24, 21, 5, 0))
+                : "";
+            _log.Info($"SNIPPETS PROBE saved={File.Exists(snippetPath)} items={reloaded.Items.Count} " +
+                      $"expanded='{expanded}'");
+
+            var history = Interaction.ClipboardHistoryStore.Load(historyPath);
+            var window = new ClipboardWindow(history, () => { }, msg => _log.Info("SNIPPETS PROBE panel: " + msg),
+                reloaded, () => reloaded.Save(snippetPath), imageDir);
+            var rows = window.SnippetRowCount;
+            _log.Info($"SNIPPETS PROBE panelRows={rows} (expected 3: two text + one image)");
+            window.Close();
+
+            var paletteItems = Interaction.PaletteItems.FromSnippets(reloaded, (_, _) => { }).ToList();
+            _log.Info($"SNIPPETS PROBE palette={paletteItems.Count} first='{(paletteItems.Count > 0 ? paletteItems[0].Title : "")}'");
+            var imageOk = imageSnippet is not null && File.Exists(imageSnippet.ImagePath);
+            _log.Info($"SNIPPETS PROBE verdict={(rows == 3 && reloaded.Items.Count == 3 && expanded.Contains("2026-10-24") && imageOk ? "PASS" : "FAIL")}");
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("SNIPPETS PROBE failed: " + ex.Message);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+        await Task.Delay(200);
+    }
+
+    /// <summary>--probe-taskboard: read the live DSH task board ledger and report what we see.</summary>
+    private async Task RunTaskBoardProbeAsync()
+    {
+        await Task.Delay(800);
+        _log.Info($"TASKBOARD PROBE ledger={Monitoring.TaskBoardWatch.LedgerPath} exists={System.IO.File.Exists(Monitoring.TaskBoardWatch.LedgerPath)}");
+        var snapshot = Monitoring.TaskBoardWatch.Read();
+        if (snapshot is null)
+        {
+            _log.Warn("TASKBOARD PROBE: ledger unreadable or not a task board file");
+        }
+        else
+        {
+            _log.Info($"TASKBOARD PROBE tasks={snapshot.Tasks.Count} running={snapshot.Running} todo={snapshot.Todo} " +
+                      $"backlog={snapshot.Backlog} doneToday={snapshot.DoneToday} failedToday={snapshot.FailedToday}");
+            foreach (var task in snapshot.Tasks.Take(8))
+                _log.Info($"TASKBOARD PROBE   [{task.Status}] {task.Title} (updated {task.UpdatedLocal:MM-dd HH:mm})");
+        }
+        await Task.Delay(300);
+    }
+
+    /// <summary>--probe-plugin-updates: ask npm which profile plugins are behind and log them.</summary>
+    private async Task RunPluginUpdatesProbeAsync()
+    {
+        await Task.Delay(800);
+        try
+        {
+            var found = await Monitoring.PluginUpdates.CheckAsync(_log, CancellationToken.None).ConfigureAwait(true);
+            _log.Info($"PLUGIN UPDATES PROBE behind={found.Count}");
+            foreach (var update in found)
+                _log.Info($"PLUGIN UPDATES PROBE {update.Name}: {update.Installed} -> {update.Latest}");
+            if (found.Count == 0) _log.Info("PLUGIN UPDATES PROBE every installed plugin is current");
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("PLUGIN UPDATES PROBE failed: " + ex.Message);
+        }
+        await Task.Delay(300);
+    }
+
+    /// <summary>--probe-palette: open the search palette, report what it ranked, close it.</summary>
+    private async Task RunPaletteProbeAsync()
+    {
+        await Task.Delay(900);
+        ShowPalette();
+        await Task.Delay(900);
+        var window = _paletteWindow;
+        if (window is null || !window.IsVisible)
+        {
+            _log.Warn("PALETTE PROBE: the palette did not open");
+            return;
+        }
+        _log.Info($"PALETTE PROBE visible=True top={string.Join(" | ", window.VisibleTitles.Take(6))}");
+        window.DebugSetQuery("清理");
+        _log.Info("PALETTE PROBE query=清理 -> " + string.Join(" | ", window.VisibleTitles.Take(5)));
+        window.DebugSetQuery("1+2*3");
+        _log.Info("PALETTE PROBE query=1+2*3 -> " + string.Join(" | ", window.VisibleTitles.Take(5)));
+        window.DebugSetQuery("vscode");
+        _log.Info("PALETTE PROBE query=vscode -> " + string.Join(" | ", window.VisibleTitles.Take(5)));
+        window.Close();
+        await Task.Delay(200);
+    }
+
     /// <summary>--probe-drop: feed a payload through the same code path a real drag uses.</summary>
     private async Task RunDropProbeAsync()
     {

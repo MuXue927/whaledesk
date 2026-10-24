@@ -53,6 +53,16 @@ internal sealed class CliOptions
     public bool ProbeDrop { get; private set; }
     /// <summary>Open the quick-launch palette briefly and report what it built.</summary>
     public bool ProbeLauncher { get; private set; }
+    /// <summary>Open the search palette briefly and report what it ranked.</summary>
+    public bool ProbePalette { get; private set; }
+    /// <summary>Run one Safe-tier cleanup pass and report what it reclaimed.</summary>
+    public bool ProbeAutoCleanup { get; private set; }
+    /// <summary>Exercise the clipboard snippet store + panel wiring headlessly.</summary>
+    public bool ProbeSnippets { get; private set; }
+    /// <summary>Print what the task-board watcher reads from the live ledger.</summary>
+    public bool ProbeTaskBoard { get; private set; }
+    /// <summary>Query npm for the profile plugins and print which ones are behind.</summary>
+    public bool ProbePluginUpdates { get; private set; }
     /// <summary>Run the space analyzer on a path and print the verdicts.</summary>
     public bool ProbeAnalyze { get; private set; }
     public string? ProbeAnalyzePath { get; private set; }
@@ -149,6 +159,11 @@ internal sealed class CliOptions
                 case "--probe-monitors": o.ProbeMonitors = true; break;
                 case "--probe-hide": o.ProbeHide = true; break;
         case "--probe-launcher": o.ProbeLauncher = true; break;
+        case "--probe-palette": o.ProbePalette = true; break;
+        case "--probe-plugin-updates": o.ProbePluginUpdates = true; break;
+        case "--probe-taskboard": o.ProbeTaskBoard = true; break;
+        case "--probe-snippets": o.ProbeSnippets = true; break;
+        case "--probe-auto-cleanup": o.ProbeAutoCleanup = true; break;
         case "--probe-dsh-api": o.ProbeDshApi = true; break;
         case "--probe-analyze":
             o.ProbeAnalyze = true;

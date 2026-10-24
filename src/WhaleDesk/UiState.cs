@@ -28,6 +28,10 @@ internal sealed class UiState
     public bool LowMemoryMode { get; set; }
     /// <summary>Announce long DSH tasks when they finish (default on).</summary>
     public bool LongTaskAlerts { get; set; } = true;
+    /// <summary>Announce DSH task-board cards that just finished; also shows the counts in the menu.</summary>
+    public bool TaskBoardAlerts { get; set; } = true;
+    /// <summary>Warn once when the battery gets low while unplugged.</summary>
+    public bool BatteryAlerts { get; set; } = true;
     /// <summary>Announce OS-level long tasks (any app, not just DSH).</summary>
     public bool OsTaskAlerts { get; set; } = true;
     /// <summary>Gentle "this app has been in front for an hour" nudge (off by default).</summary>
@@ -66,6 +70,21 @@ internal sealed class UiState
     public int RunCount { get; set; }
     /// <summary>Learned location of the DSH executable, so we can start it when it is closed.</summary>
     public string? DshExePath { get; set; }
+
+    /// <summary>Last automatic cleanup (UTC, ISO-8601).</summary>
+    public string? LastAutoCleanupUtc { get; set; }
+    /// <summary>Run the Safe-tier-only cleanup automatically once a week (default on).</summary>
+    public bool WeeklyCleanup { get; set; } = true;
+    /// <summary>Mention DSH plugins that are behind their published npm version (default on).</summary>
+    public bool PluginUpdateAlerts { get; set; } = true;
+
+    /// <summary>True when the weekly automatic cleanup is due (or has never run).</summary>
+    public bool IsAutoCleanupDue(DateTime utcNow)
+    {
+        if (string.IsNullOrWhiteSpace(LastAutoCleanupUtc)) return true;
+        if (!DateTime.TryParse(LastAutoCleanupUtc, null, System.Globalization.DateTimeStyles.RoundtripKind, out var last)) return true;
+        return (utcNow - last).TotalDays >= 7;
+    }
 
     /// <summary>True when the periodic reminder is due (or has never run).</summary>
     public bool IsCleanupScanDue(DateTime utcNow)

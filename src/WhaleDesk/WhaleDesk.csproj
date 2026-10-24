@@ -17,13 +17,17 @@
     <Product>小鲸娘桌面伴侣 (WhaleDesk)</Product>
     <Description>Desktop companion pet with DSH integration, system monitoring and cleanup helpers.</Description>
     <Copyright>WhaleDesk contributors. Sprite art: original author @linxin666 (not redistributed alone).</Copyright>
-    <Version>0.24.6</Version>
-    <FileVersion>0.24.6.0</FileVersion>
+    <Version>0.25.0</Version>
+    <FileVersion>0.25.0.0</FileVersion>
     <ApplicationIcon>..\..\assets\whaledesk.ico</ApplicationIcon>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <InvariantGlobalization>false</InvariantGlobalization>
     <!-- framework-dependent: the machine already has Microsoft.WindowsDesktop.App 9.0.19 -->
     <SelfContained>false</SelfContained>
     <DebugType>none</DebugType>
+    <!-- InvariantGlobalization MUST stay false: with it on, WPF text input goes through the
+         IME path and reports every keystroke as Key.ImeProcessed, so the search palette never
+         received typed characters and arrow keys did nothing (reported 2026-10-24, reproduced
+         with a Notepad-foreground harness: "key=ImeProcessed text=''"). -->
     <!-- WFO0003: the WinForms analyser wants DPI configured through
          ApplicationHighDpiMode because UseWindowsForms is on. This app never calls
          WinForms Application.Run; WPF reads the manifest's PerMonitorV2 declaration,

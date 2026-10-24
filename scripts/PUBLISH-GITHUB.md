@@ -3,7 +3,7 @@
 > **本机现状（2026-10-24 核实）**：发布链路已经通了，**不再需要第三方工具代劳**。
 > - `gh` CLI 2.102.0（scoop 装在 `D:\Software\scoop`，已在用户 PATH 里），已登录账号 **MuXue927**（OAuth 令牌，作用域 `repo` / `workflow` / `read:org` / `gist`）
 > - git 侧另有一份 HTTPS 凭据存在 Windows 凭据管理器（`git:https://github.com`），所以 `git push` 无需交互
-> - 2026-10-24 的 **v0.24.6** 就是由 DSH 会话直接完成 `commit → tag → push → Release → 上传附件` 的，全程无人工粘贴令牌
+> - 2026-10-24 的 **v0.24.6** 与 **v0.25.0** 都是 DSH 会话直接完成 `commit → tag → push → Release → 上传附件` 的，全程无人工粘贴令牌
 >
 > 谁执行都行：你自己在终端跑，或让 DSH 跑。下面是同一套命令。
 
@@ -56,8 +56,8 @@ gh release create v<版本> ^
 
 ## 3. 发布前自检清单
 
-- [ ] `WhaleDesk.exe --selftest` → **0 失败**（0.24.6 实测：134 通过 + 5 条环境受限跳过；那 5 条会在可写目录下照常执行，否则明确记 SKIP 而不是假装通过）
-- [ ] `WhaleDesk.exe --rehearsal` → 33/33（0.24.6 实测 `33 pass / 0 fail / 0 degraded`）
+- [ ] `WhaleDesk.exe --selftest` → **0 失败**（0.25.0 实测：150 通过 + 5 条环境受限跳过；那 5 条会在可写目录下照常执行，否则明确记 SKIP 而不是假装通过）
+- [ ] `WhaleDesk.exe --rehearsal` → 33/33（0.25.0 实测 `33 pass / 0 fail / 0 degraded`）
 - [ ] `WhaleDesk.exe --probe-dsh-api` → 核心端点 OK（有登录才有的端点显示 AUTH 属正常）
 - [ ] `WhaleDesk.exe --probe-menu` / `--probe-cleanup-panel` / `--probe-launcher` → 无异常
 - [ ] 两个 exe 的 FileVersion 一致，且等于 csproj 里的 `<FileVersion>`

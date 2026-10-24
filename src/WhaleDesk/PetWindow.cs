@@ -20,6 +20,9 @@ namespace WhaleDesk;
 /// </summary>
 internal sealed partial class PetWindow : Window
 {    private const int HotkeyId = 0xB001;
+    /// <summary>Second global hotkey: the search palette. Kept separate so one can fail to
+    /// register without taking the show/hide hotkey down with it.</summary>
+    private const int PaletteHotkeyId = 0xB002;
     private readonly CliOptions _opts;
     private readonly PetSpec _spec;
     private readonly AtlasLoader _atlas;
@@ -56,6 +59,10 @@ internal sealed partial class PetWindow : Window
     private bool _polling;
     private bool _hotkeyRegistered;
     private string _hotkeyName = "(none)";
+    private bool _paletteHotkeyRegistered;
+    private string _paletteHotkeyName = "(none)";
+    private CommandPaletteWindow? _paletteWindow;
+    private Interaction.UsageStore? _usageRanking;
     private string _stateSummary = "not-polled-yet";
     private bool _dragging;
     private bool _dragMoved;
@@ -105,6 +112,11 @@ internal sealed partial class PetWindow : Window
         _pomodoro.Configure(_ui.PomodoroFocusMinutes, _ui.PomodoroBreakMinutes);
         _pomodoro.SetPreset(_ui.PomodoroPresetMinutes);
         _longTaskAlerts = _ui.LongTaskAlerts;
+        _taskBoardAlerts = _ui.TaskBoardAlerts;
+        _batteryAlerts = _ui.BatteryAlerts;
+        _weeklyCleanup = _ui.WeeklyCleanup;
+        _pluginUpdateAlerts = _ui.PluginUpdateAlerts;
+        _diskTrendPath = Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "disk-trend.json");
         _osTaskAlerts = _ui.OsTaskAlerts;
         _downloadAlerts = _ui.DownloadAlerts;
         _watchFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
@@ -166,6 +178,7 @@ internal sealed partial class PetWindow : Window
             Persist();
             PersistPomodoro();            SelfHeal.MarkCleanExit(MarkerPath, _log);   // a marker left behind means "unclean exit"
             if (_hotkeyRegistered && _hwnd != IntPtr.Zero) Win32.UnregisterHotKey(_hwnd, HotkeyId);
+            if (_paletteHotkeyRegistered && _hwnd != IntPtr.Zero) Win32.UnregisterHotKey(_hwnd, PaletteHotkeyId);
             _source?.RemoveHook(WndProcHook);
             _tray?.Dispose();
             _monitorService.Dispose();
@@ -184,7 +197,7 @@ internal sealed partial class PetWindow : Window
         _log.Info($"exstyle applied at SourceInitialized (pre-show): {Win32.Describe(before)} -> {Win32.Describe(Win32.GetExStyle(_hwnd))}");
         _source = HwndSource.FromHwnd(_hwnd);
         _source?.AddHook(WndProcHook);
-        _taskbarCreatedMessage = SelfHeal.TaskbarCreatedMessage;        RegisterHotkey();        Activated += OnActivated;
+        _taskbarCreatedMessage = SelfHeal.TaskbarCreatedMessage;        RegisterHotkey();        RegisterPaletteHotkey();        Activated += OnActivated;
     }
     /// <summary>Path of the "was running" marker used to spot an unclean exit.</summary>
     private string MarkerPath => Path.Combine(_opts.Root, "state", SelfHeal.MarkerFileName);
@@ -205,7 +218,15 @@ internal sealed partial class PetWindow : Window
         _focusFollowSummary = $"focus={FocusActive} follow={_cursorFollow}";
         PollClipboardHistory();
         if (_autoUpdateCheck && Environment.TickCount64 - _lastUpdateCheckMs > 24L * 3600 * 1000) _ = CheckUpdateAsync(silent: true);
+        if (Environment.TickCount64 - _lastPluginUpdateCheckMs > 24L * 3600 * 1000)
+        {
+            _lastPluginUpdateCheckMs = Environment.TickCount64;
+            _ = CheckPluginUpdatesAsync(silent: true);
+        }
         PollDownloadFolder();
+        PollTaskBoard();
+        CheckBattery();
+        SampleDiskTrend();
         var now = Environment.TickCount64;
         var local = DateTime.Now;
         if (_pomodoro.Running)
@@ -315,6 +336,22 @@ internal sealed partial class PetWindow : Window
     // ---- P1: long-task alerts, status strip, memory guard ----
     private readonly TaskWatch _taskWatch = new();
     private bool _longTaskAlerts = true;
+    private bool _taskBoardAlerts = true;
+    /// <summary>Last task-board snapshot; a card that went running -> done/failed gets announced once.</summary>
+    private TaskBoardSnapshot? _taskBoard;
+    private long _lastTaskBoardPollMs;
+    private bool _batteryAlerts = true;
+    private bool _weeklyCleanup = true;
+    /// <summary>DSH plugins that are behind their npm version; refreshed once a day.</summary>
+    private IReadOnlyList<Monitoring.PluginUpdate> _pluginUpdates = Array.Empty<Monitoring.PluginUpdate>();
+    private long _lastPluginUpdateCheckMs;
+    private bool _pluginUpdateAlerts = true;
+    private long _lastBatteryCheckMs;
+    /// <summary>Percentage we already warned about, so one low-battery state warns once, not every second.</summary>
+    /// <summary>One warning per low-battery episode; re-armed by plugging in or going above 25%.</summary>
+    private bool _batteryWarned;
+    private long _lastDiskSampleMs;
+    private string _diskTrendPath = "";
     private string? _lastStatePhase;
     private long _lastStatusStripMs;
     private Border? _statusStrip;
@@ -337,6 +374,7 @@ internal sealed partial class PetWindow : Window
     private Interaction.IgnoreList? _ignoreList;
     private readonly Interaction.SedentaryWatch _sedentary = new();
     private Interaction.ClipboardHistoryStore? _clipHistory;
+    private Interaction.SnippetStore? _snippets;
     private ClipboardWindow? _clipWindow;
     private bool _sedentaryAlerts = true;
     private bool _clipHistoryEnabled = true;
@@ -346,6 +384,9 @@ internal sealed partial class PetWindow : Window
     private long _lastClipImagePollMs;
     private string SedentaryPath => Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "sedentary.json");
     private string ClipHistoryPath => Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "clipboard-history.json");
+    private string SnippetPath => Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "snippets.json");
+    private string UsagePath => Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "usage-ranking.json");
+    private string SnippetImageDir => Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "snippet-images");
     private string IgnoreListPath => Path.Combine(Path.GetDirectoryName(_opts.StatePath) ?? ".", "ignore-list.json");
     private bool _dropEnabled = true;
     private readonly List<string> _lastDroppedFiles = new();
@@ -558,6 +599,158 @@ internal sealed partial class PetWindow : Window
         _log.Warn("no global hotkey could be registered; tray left-click and re-launching remain");
     }
     public string HotkeyName => _hotkeyName;
+
+    /// <summary>
+    /// The search palette hotkey. Deliberately avoids Windows' own Alt+Space and the combination
+    /// the user's PowerToys Run already owns (Win+Alt+Space); two fallbacks follow in case the
+    /// first is taken by something else.
+    /// </summary>
+    private void RegisterPaletteHotkey()
+    {
+        (uint Mods, uint Vk, string Name)[] candidates =
+        {
+            (Win32.MOD_CONTROL | Win32.MOD_ALT | Win32.MOD_NOREPEAT, 0x20 /*Space*/, "Ctrl+Alt+Space"),
+            (Win32.MOD_CONTROL | Win32.MOD_SHIFT | Win32.MOD_NOREPEAT, 0x20 /*Space*/, "Ctrl+Shift+Space"),
+            (Win32.MOD_CONTROL | Win32.MOD_ALT | Win32.MOD_NOREPEAT, 0x4B /*K*/, "Ctrl+Alt+K"),
+        };
+        foreach (var (mods, vk, name) in candidates)
+        {
+            if (!Win32.RegisterHotKey(_hwnd, PaletteHotkeyId, mods, vk)) continue;
+            _paletteHotkeyRegistered = true;
+            _paletteHotkeyName = name;
+            _log.Info($"global hotkey registered: {name} (search palette)");
+            return;
+        }
+        _paletteHotkeyName = "(none)";
+        _log.Warn("no global hotkey for the search palette; the menu entry still opens it");
+    }
+
+    /// <summary>
+    /// Open the search palette: providers are rebuilt on every keystroke, the ranking lives in
+    /// SearchEngine, and the usage history - persisted here - nudges the order over time.
+    /// </summary>
+    private void ShowPalette()
+    {
+        try
+        {
+            if (_paletteWindow is { IsVisible: true })
+            {
+                _paletteWindow.Activate();
+                return;
+            }
+            _usageRanking ??= Interaction.UsageStore.Load(UsagePath);
+            _launchers ??= Interaction.LauncherStore.Load(LauncherConfigPath);
+            _snippets ??= Interaction.SnippetStore.Load(SnippetPath);
+            _clipHistory ??= Interaction.ClipboardHistoryStore.Load(ClipHistoryPath);
+
+            var workWidthDip = (_monitor.Right - _monitor.Left) / _monitor.Scale;
+            var workHeightDip = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
+            _paletteWindow = new CommandPaletteWindow(
+                BuildPaletteProvider,
+                _usageRanking,
+                () => _usageRanking?.Save(UsagePath),
+                id => _log.Info($"palette executed: {id}"),
+                msg => ShowLocalBubble(msg, 4000, force: true),
+                workWidthDip,
+                workHeightDip);
+            _paletteWindow.Closed += (_, _) =>
+            {
+                _usageRanking?.Save(UsagePath);
+                _paletteWindow = null;
+            };
+            PopupFrame.ShowPlaced(_paletteWindow, () => { });
+            // A palette without keyboard focus is useless: the hotkey is usually pressed while
+            // another app owns the foreground, and Windows will not hand focus over to a plain
+            // Activate(). Win32.BringToFront is the same attach-thread + SwitchToThisWindow nudge
+            // the "bring DSH back" path uses.
+            var paletteHandle = new System.Windows.Interop.WindowInteropHelper(_paletteWindow).Handle;
+            var focusSteps = Win32.BringToFront(paletteHandle);
+            _paletteWindow.Activate();
+            _log.Info($"palette opened (hotkey={_paletteHotkeyName}) focus: {focusSteps}");
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("palette failed: " + ex.Message);
+            ShowLocalBubble("搜索面板打不开：" + ex.Message, 5000, force: true);
+        }
+    }
+
+    /// <summary>Everything the palette can search, rebuilt on demand so lists stay fresh.</summary>
+    private IReadOnlyList<Interaction.PaletteItem> BuildPaletteProvider()
+    {
+        var items = new List<Interaction.PaletteItem>();
+        var commands = new List<(string Id, string Title, string Hint, Action Run)>
+        {
+            ("quick-launch", "快捷启动…", "打开快捷启动面板", ShowLauncher),
+            ("clipboard", "剪贴板历史…", "片段与最近复制", ShowClipboardHistory),
+            ("monitor", _panelOpen ? "关闭监控面板" : "监控面板", "内存 / 磁盘 / GPU", TogglePanel),
+            ("cleanup", _cleanupOpen ? "关闭 C 盘清理" : "C 盘清理…", "分级清理与空间分析", ToggleCleanup),
+            ("health", "电池与磁盘状况…", "电量、剩余空间与写满预测", ShowHealthSummary),
+            ("dsh", _dshPresence == DshLocator.DshPresence.Visible ? "切到 DSH 窗口" : "启动 / 唤起 DSH", "", BringDshToFront),
+            ("pomodoro", _pomodoro.Running ? "停止番茄钟" : "开始番茄钟", "", TogglePomodoro),
+            ("follow", _cursorFollow ? "关闭跟随光标" : "开启跟随光标", "彩蛋", ToggleCursorFollow),
+            ("focus-quiet", _focusQuiet ? "专注时安静：关" : "专注时安静：开", "", ToggleFocusQuiet),
+            ("weekly-cleanup", _weeklyCleanup ? "关闭每周自动清理" : "开启每周自动清理", "只清放心项", ToggleWeeklyCleanup),
+            ("cleanup-now", "立即清理放心项", "临时文件/缩略图缓存，回收站可还原", RunAutoCleanupNow),
+            ("plugin-updates", "检查 DSH 插件更新", "只提示，不自动升级", () => _ = CheckPluginUpdatesAsync(silent: false)),
+            ("hide-pet", "隐藏小鲸娘", "托盘图标或热键唤回", ToggleVisible),
+        };
+        items.AddRange(Interaction.PaletteItems.FromCommands(commands));
+        items.AddRange(Interaction.PaletteItems.FromSnippets(_snippets, (snippet, text) =>
+        {
+            if (Interaction.ClipboardWriter.TryCopy(Array.Empty<string>(), text, out var error))
+                ShowLocalBubble($"片段「{snippet.Name}」已放到剪贴板", 3000, force: true);
+            else
+                ShowLocalBubble("放回剪贴板失败：" + error, 4000, force: true);
+        }, snippet =>
+        {
+            try
+            {
+                var image = ClipboardWindow.LoadImageForClipboard(snippet.ImagePath);
+                if (image is null) { ShowLocalBubble("片段图片不在啦", 4000, force: true); return; }
+                System.Windows.Clipboard.SetImage(image);
+                ShowLocalBubble($"图片片段「{snippet.Name}」已放回剪贴板", 3000, force: true);
+            }
+            catch (Exception ex)
+            {
+                ShowLocalBubble("放回图片失败：" + ex.Message, 4000, force: true);
+            }
+        }));
+        items.AddRange(Interaction.PaletteItems.FromLaunchers(_launchers, RunLauncherItem));
+        items.AddRange(Interaction.PaletteItems.FromClipboard(_clipHistory, text =>
+        {
+            if (Interaction.ClipboardWriter.TryCopy(Array.Empty<string>(), text, out var error))
+                ShowLocalBubble("已放回剪贴板，去 Ctrl+V 吧", 3000, force: true);
+            else
+                ShowLocalBubble("复制失败：" + error, 4000, force: true);
+        }));
+        return items;
+    }
+
+    /// <summary>Start one quick-launch entry - same rules as the launcher window.</summary>
+    private void RunLauncherItem(Interaction.Launcher item)
+    {
+        try
+        {
+            var info = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = item.Target,
+                UseShellExecute = true,
+            };
+            if (!string.IsNullOrWhiteSpace(item.Arguments)) info.Arguments = item.Arguments;
+            info.WorkingDirectory = !string.IsNullOrWhiteSpace(item.WorkingDirectory)
+                ? item.WorkingDirectory!
+                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            System.Diagnostics.Process.Start(info);
+            _log.Info($"palette launched: {item.Name} -> {item.Target}");
+            ShowLocalBubble($"启动了「{item.Name}」", 3000, force: true);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"palette launch failed for {item.Name}: {ex.Message}");
+            ShowLocalBubble($"启动「{item.Name}」失败：{ex.Message}", 5000, force: true);
+        }
+    }
     private IntPtr WndProcHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         // Self-recovery: Explorer restarting destroys every tray icon. Windows tells us
@@ -571,6 +764,11 @@ internal sealed partial class PetWindow : Window
         {
             _log.Info("hotkey Ctrl+Alt+W pressed");
             ToggleVisible();            handled = true;
+        }
+        if (msg == Win32.WM_HOTKEY && wParam.ToInt32() == PaletteHotkeyId)
+        {
+            _log.Info($"hotkey {_paletteHotkeyName} pressed (search palette)");
+            ShowPalette();              handled = true;
         }
         return IntPtr.Zero;
     }
@@ -636,7 +834,8 @@ internal sealed partial class PetWindow : Window
         }
         _ui.RunCount++;
         _ui.Save(_opts.StatePath);
-        if (_ui.IsCleanupScanDue(DateTime.UtcNow)) _ = PeriodicCleanupReminderAsync();
+        if (_ui.WeeklyCleanup && _ui.IsAutoCleanupDue(DateTime.UtcNow)) _ = WeeklyAutoCleanupAsync();
+        else if (!_ui.WeeklyCleanup && _ui.IsCleanupScanDue(DateTime.UtcNow)) _ = PeriodicCleanupReminderAsync();
         if (_opts.ProbeHitTest) _ = RunHitTestProbeAsync();
         if (_opts.ProbeInteract) _ = RunInteractProbeAsync();
         if (_opts.ProbeMenu) _ = RunMenuProbeAsync();
@@ -653,6 +852,11 @@ internal sealed partial class PetWindow : Window
         if (_opts.ProbeSpawn) _ = RunSpawnProbeAsync();
         if (_opts.ProbeDrop) _ = RunDropProbeAsync();
         if (_opts.ProbeLauncher) _ = RunLauncherProbeAsync();
+        if (_opts.ProbePalette) _ = RunPaletteProbeAsync();
+        if (_opts.ProbePluginUpdates) _ = RunPluginUpdatesProbeAsync();
+        if (_opts.ProbeTaskBoard) _ = RunTaskBoardProbeAsync();
+        if (_opts.ProbeSnippets) _ = RunSnippetsProbeAsync();
+        if (_opts.ProbeAutoCleanup) _ = RunAutoCleanupProbeAsync();
         if (_opts.ProbeAnalyze) _ = RunAnalyzeProbeAsync();
         if (_opts.ProbeDshApi) _ = RunDshApiProbeAsync();
         if (_opts.ProbePlugins) _ = RunPluginProbeAsync();
@@ -1109,6 +1313,7 @@ internal sealed partial class PetWindow : Window
             new(_panelOpen ? "关闭监控面板" : "监控面板", TogglePanel),
             new(_cleanupOpen ? "关闭 C 盘清理" : "C 盘清理", ToggleCleanup),
             new("快捷启动…", ShowLauncher),
+            new($"搜索（{_paletteHotkeyName}）…", ShowPalette),
             new("剪贴板历史…", ShowClipboardHistory),
         };
 
@@ -1140,6 +1345,12 @@ internal sealed partial class PetWindow : Window
         var alerts = new List<PetMenuEntry>
         {
             new(_longTaskAlerts ? "长任务完成提醒：开" : "长任务完成提醒：关", ToggleLongTaskAlerts, Checked: _longTaskAlerts),
+            new(_taskBoardAlerts ? "任务板完成提醒：开" : "任务板完成提醒：关", ToggleTaskBoardAlerts, Checked: _taskBoardAlerts),
+            new(_batteryAlerts ? "低电量提醒：开" : "低电量提醒：关", ToggleBatteryAlerts, Checked: _batteryAlerts),
+            new(_weeklyCleanup ? "每周自动清理放心项：开" : "每周自动清理放心项：关", ToggleWeeklyCleanup, Checked: _weeklyCleanup),
+            new("立即清理放心项（同自动清理）", RunAutoCleanupNow),
+            new(_pluginUpdateAlerts ? "插件更新提醒：开" : "插件更新提醒：关", TogglePluginUpdateAlerts, Checked: _pluginUpdateAlerts),
+            new("电池与磁盘状况…", ShowHealthSummary),
             new(_osTaskAlerts ? "系统任务提醒：开" : "系统任务提醒：关", ToggleOsTaskAlerts, Checked: _osTaskAlerts),
             new(_appTooLongAlerts ? "应用开太久提醒：开" : "应用开太久提醒：关", ToggleAppTooLongAlerts, Checked: _appTooLongAlerts),
             new(_downloadAlerts ? "下载完成提醒：开" : "下载完成提醒：关", ToggleDownloadAlerts, Checked: _downloadAlerts),
@@ -1160,6 +1371,8 @@ internal sealed partial class PetWindow : Window
         };
         if (_dshPresence == DshLocator.DshPresence.Visible)
             dsh.Add(new("把 DSH 收进托盘（关闭窗口）", HideDshWindow));
+        if (_taskBoard is { } board)
+            dsh.Add(new($"任务板：运行中 {board.Running} · 待办 {board.Todo} · 今日完成 {board.DoneToday}", BringDshToFront));
         dsh.Add(new(_panelOpen ? "关闭监控面板" : "监控面板", TogglePanel));
         dsh.Add(new(_cleanupOpen ? "关闭 C 盘清理" : "C 盘清理", ToggleCleanup));
 
@@ -1168,6 +1381,7 @@ internal sealed partial class PetWindow : Window
             new("新手引导…", ShowOnboarding),
             new("没找到 DSH 怎么办…", ShowDshGuide),
             new("插件体检…", ShowPluginHelper),
+            new(_pluginUpdates.Count == 0 ? "检查 DSH 插件更新" : $"DSH 插件更新（{_pluginUpdates.Count} 个可更新）", () => _ = CheckPluginUpdatesAsync(silent: false)),
             new(_updateAvailableTag is null ? "检查更新" : $"检查更新（发现 {_updateAvailableTag}）", () => _ = CheckUpdateAsync(silent: false)),
             new("打开发布页", () => OpenReleasePage($"https://github.com/{UpdateRepo}/releases/latest")),
         };
@@ -1439,6 +1653,262 @@ internal sealed partial class PetWindow : Window
         _ui.Save(_opts.StatePath);
         _log.Info($"long-task alerts {(_longTaskAlerts ? "on" : "off")}");
         ShowLocalBubble(_longTaskAlerts ? "长任务完成时我会提醒你" : "长任务提醒关掉了", 3000, force: true);
+    }
+
+    /// <summary>
+    /// Poll the DSH task board every 5 s: keep the counts the menu shows fresh and announce a card
+    /// that just went running -> done/failed. Read-only; a missing or half-written ledger just
+    /// means "no data" and silences the feature instead of throwing.
+    /// </summary>
+    private void PollTaskBoard()
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastTaskBoardPollMs < 5000) return;
+        _lastTaskBoardPollMs = now;
+
+        var previous = _taskBoard;
+        var current = Monitoring.TaskBoardWatch.Read();
+        _taskBoard = current;
+        // The first successful read only establishes the baseline: cards that finished while the
+        // pet was not running must not be announced as "just now".
+        if (previous is null || current is null) return;
+
+        foreach (var task in Monitoring.TaskBoardWatch.FinishedBetween(previous, current))
+        {
+            var title = task.Title.Length <= 28 ? task.Title : task.Title[..27] + "…";
+            var done = string.Equals(task.Status, "done", StringComparison.OrdinalIgnoreCase);
+            _log.Info($"task board: '{task.Title}' finished as {task.Status} (alerts={_taskBoardAlerts})");
+            if (!_taskBoardAlerts) continue;
+            ShowLocalBubble(done ? $"任务完成：《{title}》" : $"任务失败：《{title}》", 6000, force: true);
+        }
+    }
+
+    private void ToggleTaskBoardAlerts()
+    {
+        _taskBoardAlerts = !_taskBoardAlerts;
+        _ui.TaskBoardAlerts = _taskBoardAlerts;
+        _ui.Save(_opts.StatePath);
+        _log.Info($"task-board alerts {(_taskBoardAlerts ? "on" : "off")}");
+        ShowLocalBubble(_taskBoardAlerts ? "任务板上的卡片完成 / 失败时我会提醒你" : "任务板提醒关掉了", 3000, force: true);
+    }
+
+    /// <summary>
+    /// Warn once when the battery drops low while unplugged. GetSystemPowerStatus is a single
+    /// syscall, so polling every 30 s costs nothing; the "once per episode" rule and its re-arm
+    /// condition live in <see cref="Monitoring.PowerAndDisk"/> so they are selftest-covered.
+    /// </summary>
+    private void CheckBattery()
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastBatteryCheckMs < 30_000) return;
+        _lastBatteryCheckMs = now;
+        if (!Monitoring.PowerAndDisk.TryGetBattery(out var battery)) return;
+        if (Monitoring.PowerAndDisk.RearmLowBattery(battery)) _batteryWarned = false;
+        if (!_batteryAlerts || !Monitoring.PowerAndDisk.ShouldWarnLowBattery(battery, _batteryWarned)) return;
+        _batteryWarned = true;
+        _log.Info($"battery low: {battery.Describe()}");
+        ShowLocalBubble($"电量只剩 {battery.Percent}% 了，要不要先插上电源？", 8000, force: true);
+    }
+
+    /// <summary>
+    /// Record one free-space reading per day so "how long until the disk is full" can be answered
+    /// later. Runs at most every 6 hours; the sample file keeps 14 days.
+    /// </summary>
+    private void SampleDiskTrend()
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastDiskSampleMs < 6L * 3600 * 1000) return;
+        _lastDiskSampleMs = now;
+        try
+        {
+            const string drive = @"C:\";
+            var info = new DriveInfo(drive);
+            if (!info.IsReady) return;
+            var samples = Monitoring.PowerAndDisk.RecordSample(_diskTrendPath, drive, info.AvailableFreeSpace, DateTime.Now);
+            var (perDayMb, daysLeft) = Monitoring.PowerAndDisk.Estimate(samples, drive, info.AvailableFreeSpace);
+            _log.Diag("diskTrend", $"free={Fmt.Bytes((ulong)Math.Max(0, info.AvailableFreeSpace))} perDay={perDayMb:F1}MB daysUntilFull={daysLeft} samples={samples.Count}");
+        }
+        catch (Exception ex)
+        {
+            _log.Diag("diskTrend", "sample failed: " + ex.Message);
+        }
+    }
+
+    /// <summary>On-demand summary for the menu: battery state plus the slow disk trend.</summary>
+    private void ShowHealthSummary()
+    {
+        var parts = new List<string>();
+        if (Monitoring.PowerAndDisk.TryGetBattery(out var battery)) parts.Add(battery.Describe());
+        try
+        {
+            const string drive = @"C:\";
+            var info = new DriveInfo(drive);
+            if (info.IsReady)
+            {
+                var text = "";
+                try { if (File.Exists(_diskTrendPath)) text = File.ReadAllText(_diskTrendPath); } catch { }
+                var samples = Monitoring.PowerAndDisk.ParseTrend(text);
+                var (perDayMb, daysLeft) = Monitoring.PowerAndDisk.Estimate(samples, drive, info.AvailableFreeSpace);
+                var trend = perDayMb < 0
+                    ? $"每天少 {Math.Abs(perDayMb):F0} MB" + (daysLeft > 0 ? $"，约 {daysLeft} 天写满" : "")
+                    : "最近没在减少";
+                parts.Add($"C 盘剩 {Fmt.Bytes((ulong)Math.Max(0, info.AvailableFreeSpace))}（{trend}）");
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Diag("health-summary", "disk read failed: " + ex.Message);
+        }
+        ShowLocalBubble(parts.Count == 0 ? "电池和磁盘信息都读不到" : string.Join(" · ", parts), 9000, force: true);
+        _log.Info("health summary: " + string.Join(" | ", parts));
+    }
+
+    private void ToggleBatteryAlerts()
+    {
+        _batteryAlerts = !_batteryAlerts;
+        _ui.BatteryAlerts = _batteryAlerts;
+        _ui.Save(_opts.StatePath);
+        _log.Info($"battery alerts {(_batteryAlerts ? "on" : "off")}");
+        ShowLocalBubble(_batteryAlerts ? "电量低于 20% 时我会提醒你" : "低电量提醒关掉了", 3000, force: true);
+    }
+
+    /// <summary>
+    /// The weekly half of the big cleanup: once every 7 days run ONLY the Safe tier targets -
+    /// temp files, thumbnail/icon caches and old logs, the things Windows regenerates anyway -
+    /// and report how much came back. Caution / AdminOnly / HandsOff are never touched, and the
+    /// recycle bin is never emptied (EmptyRecycleBin is not part of SafeBatch()).
+    /// A running panel batch wins: this round is skipped instead of racing it.
+    /// </summary>
+    private async Task WeeklyAutoCleanupAsync()
+    {
+        await Task.Delay(45_000).ConfigureAwait(true);   // let her settle in first
+        await AutoCleanupAsync(scheduled: true).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// The Safe-tier-only cleanup. <paramref name="scheduled"/> is the weekly run (silent when
+    /// nothing was reclaimed, and it records LastAutoCleanupUtc); a manual run from the menu always
+    /// reports back and does not move the weekly clock.
+    /// </summary>
+    private async Task AutoCleanupAsync(bool scheduled)
+    {
+        if (_cleanupBatchRunning)
+        {
+            _log.Info("cleanup skipped: a cleanup batch is already running");
+            if (!scheduled) ShowLocalBubble("正在清理中，等这一轮结束吧", 3500, force: true);
+            return;
+        }
+
+        var batch = CleanupCatalog.SafeBatch(_cleanupTempAgeDays).Where(t => t.Executable).ToList();
+        var label = scheduled ? "weekly" : "manual";
+        _log.Info($"{label} cleanup starts: {batch.Count} safe targets (temp age {_cleanupTempAgeDays} days)");
+        _cleanupBatchRunning = true;
+        long bytes = 0;
+        var deleted = 0;
+        var failed = 0;
+        try
+        {
+            foreach (var target in batch)
+            {
+                try
+                {
+                    var result = await Task.Run(() => CleanupRunner.Clean(target, _log)).ConfigureAwait(true);
+                    bytes += result.Bytes;
+                    deleted += result.Deleted;
+                    // "目录不存在" is not a failure: most cache folders simply do not exist.
+                    if (result.Error is not null && !result.Error.Contains("不存在")) failed++;
+                    _log.Info($"cleanup {target.Id}: bytes={result.Bytes} deleted={result.Deleted} error={result.Error ?? "none"}");
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    _log.Warn($"cleanup {target.Id} failed: {ex.Message}");
+                }
+                await Task.Delay(120).ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            _cleanupBatchRunning = false;
+        }
+
+        if (scheduled)
+        {
+            _ui.LastAutoCleanupUtc = DateTime.UtcNow.ToString("o");
+            _ui.Save(_opts.StatePath);
+        }
+        _log.Info($"{label} cleanup done: bytes={bytes} deleted={deleted} failed={failed} targets={batch.Count}");
+        if (bytes > 0)
+        {
+            ShowLocalBubble($"{(scheduled ? "这周的自动清理" : "清理")}完成，回收了 {Fmt.Bytes((ulong)bytes)}（只动了放心项）", 9000, force: true);
+        }
+        else if (!scheduled)
+        {
+            // Distinguish "there was nothing old enough" from "the files are in use": the second
+            // case is normal (thumbnails and shader caches are locked while apps run) and must not
+            // look like the cleanup is broken.
+            ShowLocalBubble(failed > 0
+                ? "放心项里的文件都被占用或是新的，这次没清到（下次再试）"
+                : "放心项里没有可回收的内容（临时文件都还新）", 5000, force: true);
+        }
+    }
+
+    /// <summary>Menu action: run the same safe cleanup right now, without waiting for the weekly slot.</summary>
+    private void RunAutoCleanupNow()
+    {
+        _log.Info("manual cleanup requested from the menu");
+        ShowLocalBubble("开始清理放心项（临时文件/缩略图缓存这类）…", 3500, force: true);
+        _ = AutoCleanupAsync(scheduled: false);
+    }
+
+    private void ToggleWeeklyCleanup()
+    {
+        _weeklyCleanup = !_weeklyCleanup;
+        _ui.WeeklyCleanup = _weeklyCleanup;
+        _ui.Save(_opts.StatePath);
+        _log.Info($"weekly cleanup {(_weeklyCleanup ? "on" : "off")}");
+        ShowLocalBubble(_weeklyCleanup
+            ? "每周第一次开机时，我会自动清一次放心项（临时文件/缩略图缓存这类）"
+            : "自动清理关掉了，我不再自己动手", 4000, force: true);
+    }
+
+    /// <summary>
+    /// Compare the DSH profile's plugins against npm and mention the ones that are behind.
+    /// Notification only - nothing is upgraded, because a silent upgrade could break a profile
+    /// that is working right now.
+    /// </summary>
+    private async Task CheckPluginUpdatesAsync(bool silent)
+    {
+        try
+        {
+            await Task.Delay(silent ? 12_000 : 0).ConfigureAwait(true);   // stay out of the way at startup
+            var found = await Monitoring.PluginUpdates.CheckAsync(_log, CancellationToken.None).ConfigureAwait(true);
+            _pluginUpdates = found;
+            if (found.Count == 0)
+            {
+                _log.Info("plugin updates: every installed plugin is current");
+                if (!silent) ShowLocalBubble("本机装的 DSH 插件都是最新的", 4000, force: true);
+                return;
+            }
+            _log.Info("plugin updates: " + string.Join(", ",
+                found.Select(f => $"{f.Name} {f.Installed}->{f.Latest}")));
+            if (!silent || !_pluginUpdateAlerts) return;
+            var names = string.Join("、", found.Take(3).Select(f => f.Name));
+            ShowLocalBubble($"有 {found.Count} 个 DSH 插件可更新：{names}" + (found.Count > 3 ? " 等" : ""), 9000, force: true);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("plugin update check failed: " + ex.Message);
+        }
+    }
+
+    private void TogglePluginUpdateAlerts()
+    {
+        _pluginUpdateAlerts = !_pluginUpdateAlerts;
+        _ui.PluginUpdateAlerts = _pluginUpdateAlerts;
+        _ui.Save(_opts.StatePath);
+        _log.Info($"plugin update alerts {(_pluginUpdateAlerts ? "on" : "off")}");
+        ShowLocalBubble(_pluginUpdateAlerts ? "有插件落后时我会提一句" : "插件更新提醒关掉了（菜单里仍可手动检查）", 3500, force: true);
     }
 
     /// <summary>Small caption at the bottom of the pet: what DSH is doing and for how long.</summary>
@@ -2083,9 +2553,13 @@ internal sealed partial class PetWindow : Window
                 _clipWindow.Activate();
                 return;
             }
+            _snippets ??= Interaction.SnippetStore.Load(SnippetPath);
             _clipWindow = new ClipboardWindow(_clipHistory,
                 () => _clipHistory?.Save(ClipHistoryPath),
-                msg => ShowLocalBubble(msg, 4000, force: true));
+                msg => ShowLocalBubble(msg, 4000, force: true),
+                _snippets,
+                () => _snippets?.Save(SnippetPath),
+                SnippetImageDir);
             var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
             var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
             // Placed before it is visible: see PopupFrame for the wrong-position flash this fixes.

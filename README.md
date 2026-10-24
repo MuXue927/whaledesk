@@ -1,15 +1,27 @@
 # WhaleDesk 小鲸娘桌面伴侣
 
-[![Release v0.24.6](https://img.shields.io/github/v/release/MuXue927/whaledesk?label=release&color=2ea44f)](https://github.com/MuXue927/whaledesk/releases/tag/v0.24.6)
+[![Release v0.25.0](https://img.shields.io/github/v/release/MuXue927/whaledesk?label=release&color=2ea44f)](https://github.com/MuXue927/whaledesk/releases/tag/v0.25.0)
 
 一个 .NET 9 WPF 桌面宠物：住在桌面右下角，陪你看 DSH 会话状态、监控内存/磁盘/GPU、
 做 C 盘清理与空间分析，还有跟随光标、专注番茄钟、剪贴板历史、久坐提醒等小功能。
+
+
+**0.25.0 起新增的实用功能**
+
+- **搜索面板**（`Ctrl+Alt+Space`）：一个输入框搜遍内置命令、剪贴板片段、快捷启动、剪贴板历史与算式；
+  排名规则移植自 PowerToys Run 的算法层（完全相等 > 前缀 > 子串 > 首字母缩写 > 顺序子序列，
+  再用有界的使用频率微调，不会让习惯盖过精确匹配）
+- **DSH 任务板联动**：菜单显示「运行中 / 待办 / 今日完成」，卡片完成或失败时提醒一次
+- **电池与磁盘趋势**：低电量提醒 + 每天记录剩余空间并预测「几天写满」
+- **每周自动清理**：每 7 天只清「放心项」（Safe 档），与手动清理互斥，清完汇报回收量
+- **DSH 插件更新提醒**：比对 npm 版本，只提示不自动升级
+- **剪贴板片段**：常用文本存成命名片段，支持 `{date}` / `{time}` 占位符
 
 ## 平台支持（重要）
 
 | 平台 | 状态 | 说明 |
 |---|---|---|
-| **Windows 10 / 11（x64）** | ✅ **已支持并实测** | 唯一受支持的平台；当前版本在 Windows 11 上完成 139 项自检（134 通过 + 5 条环境受限跳过）、清理演练与真机截图验证 |
+| **Windows 10 / 11（x64）** | ✅ **已支持并实测** | 唯一受支持的平台；当前版本在 Windows 11 上完成 155 项自检（150 通过 + 5 条环境受限跳过）、清理演练与真机截图验证 |
 | macOS（Intel / Apple Silicon） | ❌ **不支持** | 技术栈为 WPF + Win32 API，**无法在 macOS 上运行**（不是"没测"，是跑不起来） |
 | Linux（X11 / Wayland） | ❌ **不支持** | 同上；且目标用户较少，暂无计划 |
 
@@ -37,7 +49,7 @@ Apple 开发者账号做签名与 notarization；**在没有 Mac 真机验证的
 
 ## 自包含版（不需要 .NET）
 
-**从 v0.24.2 起，Release 里直接提供自包含包**：当前是 `WhaleDesk-0.24.6-selfcontained.zip`（约 65.4 MB，解压后约 151 MB，自带 .NET 运行时，目标机不用装 .NET）。
+**从 v0.24.2 起，Release 里直接提供自包含包**：当前是 `WhaleDesk-0.25.0-selfcontained.zip`（约 65.4 MB，解压后约 151 MB，自带 .NET 运行时，目标机不用装 .NET）。
 
 也可以自己构建：
 ```
@@ -48,7 +60,7 @@ whaledesk\scripts\build-dist-selfcontained.cmd
 ## 命令行
 | 开关 | 作用 |
 |---|---|
-| `--selftest` | 139 项自检（134 通过 + 5 条环境受限跳过） |
+| `--selftest` | 155 项自检（150 通过 + 5 条环境受限跳过） |
 | `--rehearsal` | 清理演练（dry-run） |
 | `--probe-update` | 检查 GitHub Releases 有没有新版本 |
 | `--probe-dsh-api` | 探测 DSH 接口（自动发现端口） |
