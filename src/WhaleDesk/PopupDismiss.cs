@@ -36,7 +36,13 @@ internal static class PopupDismiss
     /// </summary>
     private const long StallGuardMs = 60;
 
-    public static void Install(Window window, Func<IReadOnlyList<Window>>? extraWindows = null, Action? onDismiss = null)
+    /// <param name="allowDismiss">
+    /// Optional veto: while it returns false a press outside is ignored. The quick-launch palette
+    /// uses it to stay up while its own file/folder dialog is open - closing the owner under a
+    /// native modal dialog is what crashed the process (0xC0000005) on 0.24.3.
+    /// </param>
+    public static void Install(Window window, Func<IReadOnlyList<Window>>? extraWindows = null,
+        Action? onDismiss = null, Func<bool>? allowDismiss = null)
     {
         var timer = new DispatcherTimer(DispatcherPriority.Input)
         {
@@ -73,6 +79,7 @@ internal static class PopupDismiss
                 if (!Win32.GetCursorPos(out var pressedAt)) return;
                 if (Inside(window, pressedAt)) return;
                 if (extraWindows is not null && extraWindows().Any(w => Inside(w, pressedAt))) return;
+                if (allowDismiss is not null && !allowDismiss()) return;
                 onDismiss?.Invoke();
                 window.Close();
             }

@@ -24,10 +24,9 @@ internal sealed class LauncherWindow : Window
     private readonly string _configPath;
     private readonly Action<string> _report;
     private readonly StackPanel _rows = new();
-    /// <summary>True while a modal dialog is up. Deactivated -> Close() during a dialog was
-    /// closing the owner window under the native dialog and crashed the process (0xC0000005).</summary>
+    /// <summary>True while a modal dialog is up. Closing the owner window under a native modal
+    /// dialog crashed the process (0xC0000005), so the dismiss watchdog must not fire then.</summary>
     private bool _dialogOpen;
-    private bool _closing;
 
     private static readonly Brush Bg = new SolidColorBrush(Color.FromArgb(0xF2, 0x14, 0x1C, 0x2E));
     private static readonly Brush RowBg = new SolidColorBrush(Color.FromArgb(0x3A, 0x8A, 0xB4, 0xFF));
@@ -58,12 +57,11 @@ internal sealed class LauncherWindow : Window
         {
             if (e.Key == Key.Escape) Close();
         };
-        Deactivated += (_, _) =>
-        {
-            if (_dialogOpen || _closing) return;   // a dialog owns the focus; do not vanish
-            Close();
-        };
-        Closing += (_, _) => _closing = true;
+        // Click-outside closes, exactly like the menu and the clipboard window. The old
+        // "Deactivated -> Close()" policy is what made this panel flash away whenever the
+        // foreground bounced while it was opening (a NOACTIVATE pet window can hand activation
+        // back at any moment), and it also fought the palette's own file dialogs.
+        PopupDismiss.Install(this, allowDismiss: () => !_dialogOpen);
     }
 
     private UIElement BuildChrome()
@@ -197,14 +195,12 @@ internal sealed class LauncherWindow : Window
         return string.Join(" ", parts);
     }
 
-    /// <summary>Bottom-right of the given work area, in DIP.</summary>
-    public void PlaceBottomRight(double workRightDip, double workBottomDip, double marginDip = 20)
-    {
-        Left = Math.Max(0, workRightDip - Width - marginDip);
-        UpdateLayout();
-        var height = ActualHeight > 1 ? ActualHeight : 320;
-        Top = Math.Max(0, workBottomDip - height - marginDip);
-    }
+    /// <summary>
+    /// Show at the bottom-right of the given work area, in DIP. The window is positioned while it
+    /// is still hidden, so it never paints a frame at the default window position first.
+    /// </summary>
+    public void ShowBottomRight(double workRightDip, double workBottomDip, double marginDip = 20)
+        => PopupFrame.ShowBottomRight(this, workRightDip, workBottomDip, marginDip, fallbackHeight: 320);
 
     // ---------- add / remove ----------
     private void AddFolder()

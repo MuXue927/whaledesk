@@ -246,13 +246,4 @@ internal sealed class ClipboardWindow : Window
         text.MouseLeftButtonUp += (_, _) => onClick();
         return text;
     }
-
-    /// <summary>Bottom-right of the given work area, in DIP.</summary>
-    public void PlaceBottomRight(double workRightDip, double workBottomDip, double marginDip = 20)
-    {
-        Left = Math.Max(0, workRightDip - Width - marginDip);
-        UpdateLayout();
-        var height = ActualHeight > 1 ? ActualHeight : 400;
-        Top = Math.Max(0, workBottomDip - height - marginDip);
-    }
 }

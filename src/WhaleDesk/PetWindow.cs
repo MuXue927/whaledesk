@@ -1208,13 +1208,19 @@ internal sealed partial class PetWindow : Window
                 _log.Info("menu window closed");
                 EnforcePetVisible("menu-closed");
             };
-            _menuWindow.Show();
-            // Mark the menu open BEFORE placing it: Place() can throw (monitor unplugged, work
-            // area nonsense), and the old order left a visible menu on screen while our own state
-            // said "closed", so nothing could ever close it.
-            _menuOpen = true;
-            _menuWindow.Place();
-            _log.Info("menu window placed: " + _menuWindow.PlaceDiagnostics);
+            // Show + place in one step, with the window transparent until the placement is done:
+            // "Show() then Place()" painted one frame at the default window position first (the
+            // reported "menu flashes" of 0.24.x).
+            var menu = _menuWindow;
+            PopupFrame.ShowPlaced(menu, () =>
+            {
+                // Mark the menu open BEFORE placing it: Place() can throw (monitor unplugged, work
+                // area nonsense), and the old order left a visible menu on screen while our own
+                // state said "closed", so nothing could ever close it.
+                _menuOpen = true;
+                menu.Place();
+                _log.Info("menu window placed: " + menu.PlaceDiagnostics);
+            });
             _log.Info($"menu monitor={_monitor.Device} scale={_monitor.Scale:0.##}");
             // The menu is a separate window now, so the pet window must be untouched; prove it.
             EnforcePetVisible("menu-open");
@@ -1827,8 +1833,8 @@ internal sealed partial class PetWindow : Window
                 msg => ShowLocalBubble(msg, 4000, force: true));
             var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
             var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
-            _launcherWindow.Show();
-            _launcherWindow.PlaceBottomRight(workDipRight, workDipBottom);
+            // Positioned before Show(): see PopupFrame for the wrong-position flash this fixes.
+            _launcherWindow.ShowBottomRight(workDipRight, workDipBottom);
             _log.Info($"launcher opened: {_launchers.Visible().Count} items, config={LauncherConfigPath}");
         }
         catch (Exception ex)
@@ -2082,8 +2088,8 @@ internal sealed partial class PetWindow : Window
                 msg => ShowLocalBubble(msg, 4000, force: true));
             var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
             var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
-            _clipWindow.Show();
-            _clipWindow.PlaceBottomRight(workDipRight, workDipBottom);
+            // Placed before it is visible: see PopupFrame for the wrong-position flash this fixes.
+            PopupFrame.ShowBottomRight(_clipWindow, workDipRight, workDipBottom, 20, 400);
             _log.Info($"clipboard history opened: {_clipHistory.Entries.Count} entries");
         }
         catch (Exception ex)
@@ -2133,8 +2139,8 @@ internal sealed partial class PetWindow : Window
             ShowAnalysis(report, keep, ignore);
             var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
             var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
-            if (_analysisWindow is not null) _analysisWindow.Show();
-            _analysisWindow!.PlaceBottomRight(workDipRight, workDipBottom);
+            if (_analysisWindow is not null)
+                PopupFrame.ShowBottomRight(_analysisWindow, workDipRight, workDipBottom, 20, 460);
         }
         catch (Exception ex)
         {
@@ -2157,8 +2163,7 @@ internal sealed partial class PetWindow : Window
             target => _ = CleanCachesAsync(target));
         var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
         var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
-        _analysisWindow.Show();
-        _analysisWindow.PlaceBottomRight(workDipRight, workDipBottom);
+        PopupFrame.ShowBottomRight(_analysisWindow, workDipRight, workDipBottom, 20, 460);
     }
 
     /// <summary>Dig 3 levels down and list every cache we can safely remove.</summary>
@@ -2333,10 +2338,15 @@ internal sealed partial class PetWindow : Window
         var scale = _monitor.Scale <= 0 ? 1.0 : _monitor.Scale;
         var workRightDip = _monitor.Right / scale;
         var workBottomDip = _monitor.Bottom / scale;
-        window.Show();
-        if (window is OnboardingWindow onboarding) onboarding.Place(workRightDip, workBottomDip);
-        else if (window is DshGuideWindow guide) guide.Place(workRightDip, workBottomDip);
-        else if (window is PluginHelperWindow plugins) plugins.Place(workRightDip, workBottomDip);
+        // Placed before it is visible: see PopupFrame for the wrong-position flash this fixes.
+        var (margin, fallback) = window switch
+        {
+            OnboardingWindow => (24.0, 420.0),
+            DshGuideWindow => (24.0, 380.0),
+            PluginHelperWindow => (24.0, 460.0),
+            _ => (20.0, 400.0),
+        };
+        PopupFrame.ShowBottomRight(window, workRightDip, workBottomDip, margin, fallback);
     }
 
     private async Task ShowOnboardingAfterStartupAsync()

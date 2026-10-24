@@ -264,8 +264,10 @@ internal sealed class MenuWindow : Window
             }
             _sub.Fill(section.Title, section.Items,
                 rowTopPhysical, parentRect.Left, parentRect.Right - parentRect.Left);
-            if (!_sub.IsVisible) _sub.Show();
-            _sub.Place();
+            // Placed while still transparent: "Show() then Place()" painted the flyout at the
+            // default window position first (the "second-level panel flashes" report).
+            if (!_sub.IsVisible) PopupFrame.ShowPlaced(_sub, _sub.Place);
+            else _sub.Place();
             _subSection = section;
         }
         catch

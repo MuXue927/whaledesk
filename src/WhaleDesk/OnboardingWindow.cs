@@ -191,13 +191,4 @@ internal sealed class OnboardingWindow : Window
         }
         Close();
     }
-
-    /// <summary>Bottom-right of the work area, in DIP.</summary>
-    public void Place(double workRightDip, double workBottomDip, double marginDip = 24)
-    {
-        Left = Math.Max(0, workRightDip - Width - marginDip);
-        UpdateLayout();
-        var height = ActualHeight > 1 ? ActualHeight : 420;
-        Top = Math.Max(0, workBottomDip - height - marginDip);
-    }
 }
