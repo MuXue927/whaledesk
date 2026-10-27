@@ -196,11 +196,12 @@ internal sealed class LauncherWindow : Window
     }
 
     /// <summary>
-    /// Show at the bottom-right of the given work area, in DIP. The window is positioned while it
-    /// is still hidden, so it never paints a frame at the default window position first.
+    /// Show at the bottom-right of the monitor's work area. The window is positioned in physical
+    /// pixels while it is still hidden, so it never paints a frame at the default window position
+    /// first and lands correctly on a secondary monitor too.
     /// </summary>
-    public void ShowBottomRight(double workRightDip, double workBottomDip, double marginDip = 20)
-        => PopupFrame.ShowBottomRight(this, workRightDip, workBottomDip, marginDip, fallbackHeight: 320);
+    public void ShowBottomRight(MonitorEntry monitor, double marginDip = 20)
+        => PopupFrame.ShowBottomRight(this, monitor, marginDip);
 
     // ---------- add / remove ----------
     private void AddFolder()

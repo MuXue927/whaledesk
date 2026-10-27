@@ -643,22 +643,21 @@ internal sealed partial class PetWindow : Window
             _snippets ??= Interaction.SnippetStore.Load(SnippetPath);
             _clipHistory ??= Interaction.ClipboardHistoryStore.Load(ClipHistoryPath);
 
-            var workWidthDip = (_monitor.Right - _monitor.Left) / _monitor.Scale;
-            var workHeightDip = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
             _paletteWindow = new CommandPaletteWindow(
                 BuildPaletteProvider,
                 _usageRanking,
                 () => _usageRanking?.Save(UsagePath),
                 id => _log.Info($"palette executed: {id}"),
                 msg => ShowLocalBubble(msg, 4000, force: true),
-                workWidthDip,
-                workHeightDip);
+                _monitor);
             _paletteWindow.Closed += (_, _) =>
             {
                 _usageRanking?.Save(UsagePath);
                 _paletteWindow = null;
             };
-            PopupFrame.ShowPlaced(_paletteWindow, () => { });
+            // Physical placement against the pet's own monitor: a DIP Left/Top assumes the
+            // primary monitor's origin and would leave a secondary-monitor palette half off screen.
+            PopupFrame.ShowCenteredTop(_paletteWindow, _monitor, 0.22);
             // A palette without keyboard focus is useless: the hotkey is usually pressed while
             // another app owns the foreground, and Windows will not hand focus over to a plain
             // Activate(). Win32.BringToFront is the same attach-thread + SwitchToThisWindow nudge
@@ -856,6 +855,7 @@ internal sealed partial class PetWindow : Window
         if (_opts.ProbePluginUpdates) _ = RunPluginUpdatesProbeAsync();
         if (_opts.ProbeTaskBoard) _ = RunTaskBoardProbeAsync();
         if (_opts.ProbeSnippets) _ = RunSnippetsProbeAsync();
+        if (_opts.ProbePopupPlacement) _ = RunPopupPlacementProbeAsync();
         if (_opts.ProbeAutoCleanup) _ = RunAutoCleanupProbeAsync();
         if (_opts.ProbeAnalyze) _ = RunAnalyzeProbeAsync();
         if (_opts.ProbeDshApi) _ = RunDshApiProbeAsync();
@@ -2301,10 +2301,8 @@ internal sealed partial class PetWindow : Window
             }
             _launcherWindow = new LauncherWindow(_launchers, LauncherConfigPath, "小鲸娘 · 快捷启动",
                 msg => ShowLocalBubble(msg, 4000, force: true));
-            var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
-            var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
             // Positioned before Show(): see PopupFrame for the wrong-position flash this fixes.
-            _launcherWindow.ShowBottomRight(workDipRight, workDipBottom);
+            PopupFrame.ShowBottomRight(_launcherWindow, _monitor, 20);
             _log.Info($"launcher opened: {_launchers.Visible().Count} items, config={LauncherConfigPath}");
         }
         catch (Exception ex)
@@ -2560,10 +2558,8 @@ internal sealed partial class PetWindow : Window
                 _snippets,
                 () => _snippets?.Save(SnippetPath),
                 SnippetImageDir);
-            var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
-            var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
             // Placed before it is visible: see PopupFrame for the wrong-position flash this fixes.
-            PopupFrame.ShowBottomRight(_clipWindow, workDipRight, workDipBottom, 20, 400);
+            PopupFrame.ShowBottomRight(_clipWindow, _monitor, 20);
             _log.Info($"clipboard history opened: {_clipHistory.Entries.Count} entries");
         }
         catch (Exception ex)
@@ -2611,10 +2607,8 @@ internal sealed partial class PetWindow : Window
 
             _analysisWindow?.Close();
             ShowAnalysis(report, keep, ignore);
-            var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
-            var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
             if (_analysisWindow is not null)
-                PopupFrame.ShowBottomRight(_analysisWindow, workDipRight, workDipBottom, 20, 460);
+                PopupFrame.ShowBottomRight(_analysisWindow, _monitor, 20);
         }
         catch (Exception ex)
         {
@@ -2635,9 +2629,7 @@ internal sealed partial class PetWindow : Window
             () => ignore.Save(IgnoreListPath),
             deeper => _ = DeepScanAsync(deeper),
             target => _ = CleanCachesAsync(target));
-        var workDipRight = (_monitor.Right - _monitor.Left) / _monitor.Scale;
-        var workDipBottom = (_monitor.Bottom - _monitor.Top) / _monitor.Scale;
-        PopupFrame.ShowBottomRight(_analysisWindow, workDipRight, workDipBottom, 20, 460);
+        PopupFrame.ShowBottomRight(_analysisWindow, _monitor, 20);
     }
 
     /// <summary>Dig 3 levels down and list every cache we can safely remove.</summary>
@@ -2809,18 +2801,15 @@ internal sealed partial class PetWindow : Window
 
     private void PlaceWindowBottomRight(Window window)
     {
-        var scale = _monitor.Scale <= 0 ? 1.0 : _monitor.Scale;
-        var workRightDip = _monitor.Right / scale;
-        var workBottomDip = _monitor.Bottom / scale;
         // Placed before it is visible: see PopupFrame for the wrong-position flash this fixes.
-        var (margin, fallback) = window switch
+        var margin = window switch
         {
-            OnboardingWindow => (24.0, 420.0),
-            DshGuideWindow => (24.0, 380.0),
-            PluginHelperWindow => (24.0, 460.0),
-            _ => (20.0, 400.0),
+            OnboardingWindow => 24.0,
+            DshGuideWindow => 24.0,
+            PluginHelperWindow => 24.0,
+            _ => 20.0,
         };
-        PopupFrame.ShowBottomRight(window, workRightDip, workBottomDip, margin, fallback);
+        PopupFrame.ShowBottomRight(window, _monitor, margin);
     }
 
     private async Task ShowOnboardingAfterStartupAsync()

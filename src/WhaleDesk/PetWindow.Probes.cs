@@ -341,6 +341,68 @@ internal sealed partial class PetWindow
     }
 
     /// <summary>
+    /// <summary>
+    /// --probe-placement: put the real popup windows at the bottom-right of EVERY monitor and log
+    /// whether Win32 says they landed fully inside that monitor's work area. This is the check for
+    /// the "panel straddles two screens on the secondary monitor" report: it must pass on every
+    /// monitor, not just the primary one.
+    /// </summary>
+    private async Task RunPopupPlacementProbeAsync()
+    {
+        await Task.Delay(700);
+        var monitors = Monitors.All(refresh: true);
+        _log.Info($"PLACEMENT PROBE monitors={monitors.Count}");
+        foreach (var monitor in monitors)
+            _log.Info($"PLACEMENT PROBE monitor: {monitor.Label} work=({monitor.Left},{monitor.Top})-({monitor.Right},{monitor.Bottom}) scale={monitor.Scale:0.##}");
+
+        var history = _clipHistory ?? Interaction.ClipboardHistoryStore.Load(ClipHistoryPath);
+        var snippets = _snippets ?? Interaction.SnippetStore.Load(SnippetPath);
+        var launchers = _launchers ?? Interaction.LauncherStore.Load(LauncherConfigPath);
+        var usage = _usageRanking ?? Interaction.UsageStore.Load(UsagePath);
+
+        foreach (var monitor in monitors)
+        {
+            // 1) clipboard panel (the one the user reported)
+            var clip = new ClipboardWindow(history, () => { }, _ => { }, snippets, () => { }, SnippetImageDir);
+            PopupFrame.ShowBottomRight(clip, monitor, 20);
+            await Task.Delay(950);
+            LogPopupPlacement("clipboard", clip, monitor);
+            clip.Close();
+
+            // 2) quick launcher (same PopupFrame path as analysis / onboarding / guide / plugin)
+            var launcher = new LauncherWindow(launchers, LauncherConfigPath, "小鲸娘 · 快捷启动", _ => { });
+            PopupFrame.ShowBottomRight(launcher, monitor, 20);
+            await Task.Delay(950);
+            LogPopupPlacement("launcher", launcher, monitor);
+            launcher.Close();
+
+            // 3) search palette (centred horizontally, 22% down the monitor)
+            var palette = new CommandPaletteWindow(BuildPaletteProvider, usage, () => { }, _ => { }, _ => { }, monitor);
+            PopupFrame.ShowCenteredTop(palette, monitor, 0.22);
+            await Task.Delay(950);
+            LogPopupPlacement("palette", palette, monitor);
+            palette.Close();
+
+            await Task.Delay(250);
+        }
+        _log.Info("PLACEMENT PROBE finished");
+    }
+
+    /// <summary>Compare the window's physical rectangle with the monitor it was placed on.</summary>
+    private void LogPopupPlacement(string label, Window window, MonitorEntry monitor)
+    {
+        var handle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        if (handle == IntPtr.Zero || !Win32.GetWindowRect(handle, out var rect))
+        {
+            _log.Warn($"PLACEMENT PROBE {label} @{monitor.Label}: no window rect");
+            return;
+        }
+        var inside = rect.Left >= monitor.Left && rect.Right <= monitor.Right &&
+                     rect.Top >= monitor.Top && rect.Bottom <= monitor.Bottom;
+        _log.Info($"PLACEMENT PROBE {label} @{monitor.Label}: rect=({rect.Left},{rect.Top})-({rect.Right},{rect.Bottom}) " +
+                  $"size={rect.Right - rect.Left}x{rect.Bottom - rect.Top} inside={inside}");
+    }
+
     /// <summary>--probe-auto-cleanup: run one Safe-tier cleanup pass and report the result.</summary>
     private async Task RunAutoCleanupProbeAsync()
     {

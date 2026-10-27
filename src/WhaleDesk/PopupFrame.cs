@@ -19,39 +19,51 @@ namespace WhaleDesk;
 /// its first layout pass, is corrected to the exact corner once the layout reports a real
 /// height, and only then becomes opaque. Any frame spent at a wrong position is invisible by
 /// construction.
+///
+/// Placement is done in PHYSICAL pixels with SetWindowPos, against the target monitor's work
+/// rectangle. WPF's Window.Left/Top are DIPs whose origin follows the primary monitor, so a
+/// popup on a secondary monitor placed with them lands at the primary monitor's edge and gets cut
+/// off by the screen boundary (reported 2026-10-28 for the clipboard panel).
 /// </summary>
 internal static class PopupFrame
 {
     /// <summary>
-    /// Show <paramref name="window"/> at the bottom-right of the given work area (DIP), with the
-    /// placement done before the window is visible.
+    /// Show <paramref name="window"/> at the bottom-right of <paramref name="monitor"/>'s work area.
     /// </summary>
-    /// <param name="fallbackHeight">Used only when the content cannot be measured at all.</param>
-    public static void ShowBottomRight(Window window, double workRightDip, double workBottomDip,
-        double marginDip, double fallbackHeight)
+    public static void ShowBottomRight(Window window, MonitorEntry monitor, double marginDip)
     {
-        PlaceAtBottomRight(window, workRightDip, workBottomDip, marginDip, fallbackHeight);
+        window.Opacity = 0;
+        try
+        {
+            // A handle is enough for a physical placement, so the first visible frame already
+            // lands in the corner; the passes below refine it once the real height is known.
+            new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle();
+        }
+        catch
+        {
+            // the correction passes below still run once the window is up
+        }
         window.Show();
-        CorrectThenReveal(window, () => AlignBottomRight(window, workRightDip, workBottomDip, marginDip));
+        CorrectThenReveal(window, () => PlaceBottomRight(window, monitor, marginDip));
     }
 
     /// <summary>
-    /// Flush the window against the corner using the rectangle Win32 reports, not WPF's
-    /// ActualHeight: with SizeToContent, ActualHeight keeps reporting the height reserved before
-    /// the window was shrunk (293 vs 253), which is what left the palette 40 px above the corner.
+    /// Show <paramref name="window"/> centred horizontally on <paramref name="monitor"/>, with its
+    /// top at <paramref name="topFraction"/> of the monitor height (the search palette).
     /// </summary>
-    private static void AlignBottomRight(Window window, double workRightDip, double workBottomDip, double marginDip)
+    public static void ShowCenteredTop(Window window, MonitorEntry monitor, double topFraction)
     {
-        var handle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
-        if (handle == IntPtr.Zero || !Win32.GetWindowRect(handle, out var rect)) return;
-
-        var scale = System.Windows.Media.VisualTreeHelper.GetDpi(window).DpiScaleX;
-        if (scale <= 0) scale = 1.0;
-
-        var dx = (workRightDip - marginDip) - rect.Right / scale;
-        var dy = (workBottomDip - marginDip) - rect.Bottom / scale;
-        if (Math.Abs(dx) > 0.5) window.Left += dx;
-        if (Math.Abs(dy) > 0.5) window.Top += dy;
+        window.Opacity = 0;
+        try
+        {
+            new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle();
+        }
+        catch
+        {
+            // the correction passes below still run once the window is up
+        }
+        window.Show();
+        CorrectThenReveal(window, () => PlaceCenteredTop(window, monitor, topFraction));
     }
 
     /// <summary>
@@ -76,22 +88,61 @@ internal static class PopupFrame
         CorrectThenReveal(window, place);
     }
 
-    private static void PlaceAtBottomRight(Window window, double workRightDip, double workBottomDip,
-        double marginDip, double fallbackHeight)
+    /// <summary>Physical bottom-right placement of a window that is already shown.</summary>
+    public static void PlaceBottomRight(Window window, MonitorEntry monitor, double marginDip)
     {
-        var width = window.Width > 0 ? window.Width : 320;
-        var height = GuessHeight(window, width, fallbackHeight);
-        window.Left = Math.Max(0, workRightDip - width - marginDip);
-        window.Top = Math.Max(0, workBottomDip - height - marginDip);
-        window.Opacity = 0;
+        if (!TryGetPhysicalSize(window, out var size)) return;
+        var (x, y) = Placement.BottomRight(monitor, size.Width, size.Height, marginDip, marginDip);
+        var (clampedX, clampedY) = Placement.Clamp(monitor, x, y, size.Width, size.Height);
+        MovePhysical(window, clampedX, clampedY);
+    }
+
+    /// <summary>Physical centred-top placement (the search palette).</summary>
+    public static void PlaceCenteredTop(Window window, MonitorEntry monitor, double topFraction)
+    {
+        if (!TryGetPhysicalSize(window, out var size)) return;
+        var (x, y) = Placement.CenteredTop(monitor, size.Width, size.Height, topFraction);
+        var (clampedX, clampedY) = Placement.Clamp(monitor, x, y, size.Width, size.Height);
+        MovePhysical(window, clampedX, clampedY);
+    }
+
+    private static bool TryGetPhysicalSize(Window window, out (int Width, int Height) size)
+    {
+        size = default;
+        try
+        {
+            var handle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+            if (handle == IntPtr.Zero || !Win32.GetWindowRect(handle, out var rect)) return false;
+            size = (rect.Right - rect.Left, rect.Bottom - rect.Top);
+            return size.Width > 0 && size.Height > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void MovePhysical(Window window, int x, int y)
+    {
+        try
+        {
+            var handle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+            if (handle == IntPtr.Zero) return;
+            Win32.SetWindowPos(handle, IntPtr.Zero, x, y, 0, 0,
+                Win32.SWP_NOSIZE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+        }
+        catch
+        {
+            // a placement error must never leave the popup invisible
+        }
     }
 
     private static void CorrectThenReveal(Window window, Action place)
     {
         // Two passes on purpose: the first one runs right after the window's first layout, where
-        // ActualHeight still reports the height WPF reserved before SizeToContent shrank the
-        // window (293 where the palette really ends up 253 high); the second one runs after that
-        // pass and sees the real numbers. The window is transparent for both.
+        // the size Win32 reports is still the one reserved before SizeToContent shrank the window;
+        // the second one runs after that pass and sees the real numbers. The window is transparent
+        // for both.
         window.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
             TryPlace(place);
@@ -113,36 +164,5 @@ internal static class PopupFrame
         {
             // a placement error must never leave the popup invisible
         }
-    }
-
-    /// <summary>
-    /// Height the content is expected to want. The handle is created first (still hidden) so the
-    /// measurement runs in the window's real DPI context instead of a detached one.
-    /// </summary>
-    private static double GuessHeight(Window window, double width, double fallbackHeight)
-    {
-        try
-        {
-            new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle();
-            window.UpdateLayout();
-            var height = window.ActualHeight;
-            if (height > 1) return window.MaxHeight > 0 ? Math.Min(height, window.MaxHeight) : height;
-
-            if (window.Content is FrameworkElement content)
-            {
-                content.Measure(new Size(width, double.PositiveInfinity));
-                if (content.DesiredSize.Height > 1)
-                {
-                    var desired = content.DesiredSize.Height;
-                    if (window.MaxHeight > 0) desired = Math.Min(desired, window.MaxHeight);
-                    return Math.Ceiling(desired);
-                }
-            }
-        }
-        catch
-        {
-            // best effort; the reveal pass below still lands the window correctly
-        }
-        return fallbackHeight;
     }
 }

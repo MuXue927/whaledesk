@@ -55,8 +55,11 @@ internal sealed class CliOptions
     public bool ProbeLauncher { get; private set; }
     /// <summary>Open the search palette briefly and report what it ranked.</summary>
     public bool ProbePalette { get; private set; }
+    /// <summary>Place every popup on every monitor and report whether it landed inside.</summary>
     /// <summary>Run one Safe-tier cleanup pass and report what it reclaimed.</summary>
     public bool ProbeAutoCleanup { get; private set; }
+    /// <summary>Place every popup window on every monitor and report whether it stayed inside.</summary>
+    public bool ProbePopupPlacement { get; private set; }
     /// <summary>Exercise the clipboard snippet store + panel wiring headlessly.</summary>
     public bool ProbeSnippets { get; private set; }
     /// <summary>Print what the task-board watcher reads from the live ledger.</summary>
@@ -163,6 +166,7 @@ internal sealed class CliOptions
         case "--probe-plugin-updates": o.ProbePluginUpdates = true; break;
         case "--probe-taskboard": o.ProbeTaskBoard = true; break;
         case "--probe-snippets": o.ProbeSnippets = true; break;
+        case "--probe-popup-placement": o.ProbePopupPlacement = true; break;
         case "--probe-auto-cleanup": o.ProbeAutoCleanup = true; break;
         case "--probe-dsh-api": o.ProbeDshApi = true; break;
         case "--probe-analyze":

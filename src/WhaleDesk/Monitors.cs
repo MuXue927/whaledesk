@@ -124,6 +124,11 @@ internal static class Placement
         (m.Right - w - Px(marginX, m.Scale),
          m.Bottom - h - Px(marginY, m.Scale));
 
+    /// <summary>Horizontally centred on the monitor, down a fraction of its height.</summary>
+    public static (int X, int Y) CenteredTop(MonitorEntry m, int w, int h, double topFraction) =>
+        (m.Left + Math.Max(0, (m.Width - w) / 2),
+         m.Top + (int)Math.Round(m.Height * topFraction));
+
     public static string DecideAnchor(MonitorEntry m, int windowCenterX) =>
         windowCenterX < (m.Left + m.Right) / 2 ? "left" : "right";
 

@@ -50,8 +50,7 @@ internal sealed class CommandPaletteWindow : Window
         Action? onUsed,
         Action<string>? onExecuted,
         Action<string> notify,
-        double workWidthDip,
-        double workHeightDip,
+        MonitorEntry monitor,
         double marginDip = 20)
     {
         _provider = provider;
@@ -75,9 +74,12 @@ internal sealed class CommandPaletteWindow : Window
 
         Content = Build();
 
+        // Width is DIP; the monitor work area is physical, so convert. The actual position is set
+        // in physical pixels by PopupFrame (WPF Left/Top assume the primary monitor's origin, which
+        // puts a secondary-monitor palette half off the screen).
+        var monitorScale = monitor.Scale <= 0 ? 1.0 : monitor.Scale;
+        var workWidthDip = monitor.Width / monitorScale;
         Width = Math.Min(Width, Math.Max(320, workWidthDip - marginDip * 2));
-        Left = Math.Max(0, (workWidthDip - Width) / 2);
-        Top = Math.Max(0, workHeightDip * 0.22);
 
         Loaded += (_, _) => FocusInput();
         Activated += (_, _) => FocusInput();

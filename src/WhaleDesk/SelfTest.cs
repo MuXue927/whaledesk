@@ -272,6 +272,17 @@ internal static class SelfTest
         Check("dock-on-secondary-monitor", sX == 4480 && sY == 922,
             $"got {sX},{sY} (expected 4480,922: 4800-300-20, 1300-365-13)");
 
+        // Popups are placed in physical pixels against the monitor rect; a DIP Left/Top would use
+        // the primary monitor's origin and put a secondary-monitor panel half off the screen.
+        var (pcX, pcY) = Placement.CenteredTop(secondary, 1000, 400, 0.22);
+        Check("popup-centered-on-secondary-monitor",
+            pcX == (secondary.Left + secondary.Right - 1000) / 2 && pcY == secondary.Top + (int)Math.Round(secondary.Height * 0.22),
+            $"palette on the secondary monitor: got {pcX},{pcY} (must include the monitor's own origin {secondary.Left},{secondary.Top})");
+        var (pbX, pbY) = Placement.BottomRight(secondary, 600, 500, 20, 20);
+        Check("popup-bottom-right-inside-secondary-monitor",
+            pbX >= secondary.Left && pbX + 600 <= secondary.Right && pbY >= secondary.Top && pbY + 500 <= secondary.Bottom,
+            $"clipboard panel on the secondary monitor: {pbX},{pbY} 600x500 inside ({secondary.Left},{secondary.Top})-({secondary.Right},{secondary.Bottom})");
+
         // ---------- P2.1: state persistence (physical pixels + monitor device) ----------
         var statePath = Path.Combine(opts.BuildDir, "verify", "state-roundtrip.json");
         new UiState { Monitor = @"\\.\DISPLAY2", X = 4480, Y = 922, Anchor = "right", Paused = true }.Save(statePath);
